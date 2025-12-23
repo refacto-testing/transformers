@@ -400,7 +400,7 @@ class StaticSlidingWindowLayer(StaticLayer):
         """
         # Lazy initialization
         if not self.is_initialized:
-            self.lazy_initialization(key_states)
+            self.lazy_initialization(key_states, value_states)
 
         # Some old models give None for `cache_position` or even omit passing `cache_kwargs` when used as cross-attention,
         # in which case we should copy the whole Layer (key_states.shape[-2] == self.max_cache_len)
