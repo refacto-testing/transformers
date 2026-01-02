@@ -12,33 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" FNet model configuration"""
+"""FNet model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import FNET_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class FNetConfig(PretrainedConfig):
+class FNetConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`FNetModel`]. It is used to instantiate an FNet
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the FNet
     [google/fnet-base](https://huggingface.co/google/fnet-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
         vocab_size (`int`, *optional*, defaults to 32000):
             Vocabulary size of the FNet model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`FNetModel`] or [`TFFNetModel`].
+            `inputs_ids` passed when calling [`FNetModel`].
         hidden_size (`int`, *optional*, defaults to 768):
             Dimension of the encoder layers and the pooler layer.
         num_hidden_layers (`int`, *optional*, defaults to 12):
@@ -54,7 +51,7 @@ class FNetConfig(PretrainedConfig):
             The maximum sequence length that this model might ever be used with. Typically set this to something large
             just in case (e.g., 512 or 1024 or 2048).
         type_vocab_size (`int`, *optional*, defaults to 4):
-            The vocabulary size of the `token_type_ids` passed when calling [`FNetModel`] or [`TFFNetModel`].
+            The vocabulary size of the `token_type_ids` passed when calling [`FNetModel`].
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
         layer_norm_eps (`float`, *optional*, defaults to 1e-12):
@@ -117,3 +114,6 @@ class FNetConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.use_tpu_fourier_optimizations = use_tpu_fourier_optimizations
         self.tpu_short_seq_length = tpu_short_seq_length
+
+
+__all__ = ["FNetConfig"]

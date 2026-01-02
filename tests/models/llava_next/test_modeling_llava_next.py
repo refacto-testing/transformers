@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,33 +11,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Testing suite for the PyTorch Llava-NeXT model. """
+"""Testing suite for the PyTorch Llava-NeXT model."""
 
 import copy
-import gc
 import unittest
 
 import requests
 from huggingface_hub import hf_hub_download
+from parameterized import parameterized
 
 from transformers import (
     AutoProcessor,
+    BitsAndBytesConfig,
     LlavaNextConfig,
     LlavaNextForConditionalGeneration,
+    LlavaNextModel,
     is_torch_available,
     is_vision_available,
 )
-from transformers.testing_utils import require_bitsandbytes, require_torch, slow, torch_device
+from transformers.testing_utils import (
+    cleanup,
+    require_bitsandbytes,
+    require_torch,
+    slow,
+    torch_device,
+)
+from transformers.utils import check_torch_load_is_safe
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor
+from ...test_modeling_common import (
+    ModelTesterMixin,
+    floats_tensor,
+    ids_tensor,
+)
 
 
 if is_torch_available():
     import torch
-else:
-    is_torch_greater_or_equal_than_2_0 = False
+
+    from transformers.models.llava_next.modeling_llava_next import image_size_to_num_patches
+
 
 if is_vision_available():
     from PIL import Image
@@ -75,12 +88,12 @@ class LlavaNextVisionText2TextModelTester:
             "initializer_range": 0.02,
             "num_labels": 3,
             "num_choices": 4,
-            "pad_token_id": 0,
+            "pad_token_id": 1,
         },
         is_training=True,
         vision_config={
-            "image_size": 16,
-            "patch_size": 2,
+            "image_size": 8,
+            "patch_size": 4,
             "num_channels": 3,
             "is_training": True,
             "hidden_size": 32,
@@ -101,7 +114,7 @@ class LlavaNextVisionText2TextModelTester:
         self.vision_feature_layer = vision_feature_layer
         self.text_config = text_config
         self.vision_config = vision_config
-        self.seq_length = seq_length
+        self.pad_token_id = text_config["pad_token_id"]
 
         self.num_hidden_layers = text_config["num_hidden_layers"]
         self.vocab_size = text_config["vocab_size"]
@@ -112,8 +125,10 @@ class LlavaNextVisionText2TextModelTester:
         self.batch_size = 3
         self.num_channels = 3
         self.image_size = 30
-        self.encoder_seq_length = 342
-        self.image_grid_pinpoints = [[32, 32]]
+        self.image_grid_pinpoints = [[16, 16]]
+        self.num_image_tokens = 24
+        self.seq_length = seq_length + self.num_image_tokens
+        self.encoder_seq_length = self.seq_length
 
     def get_config(self):
         return LlavaNextConfig(
@@ -125,6 +140,7 @@ class LlavaNextVisionText2TextModelTester:
             vision_feature_select_strategy=self.vision_feature_select_strategy,
             vision_feature_layer=self.vision_feature_layer,
             image_grid_pinpoints=self.image_grid_pinpoints,
+            image_seq_length=self.num_image_tokens,
         )
 
     def prepare_config_and_inputs(self):
@@ -144,10 +160,12 @@ class LlavaNextVisionText2TextModelTester:
     def prepare_config_and_inputs_for_common(self):
         config_and_inputs = self.prepare_config_and_inputs()
         config, pixel_values = config_and_inputs
-        input_ids = ids_tensor([self.batch_size, self.seq_length], config.text_config.vocab_size - 1) + 1
-        attention_mask = input_ids.ne(1).to(torch_device)
-        # we are giving 3 images let's make sure we pass in 3 image tokens
-        input_ids[:, 1] = config.image_token_index
+        input_ids = ids_tensor([self.batch_size, self.seq_length], config.text_config.vocab_size - 2) + 2
+        attention_mask = torch.ones(input_ids.shape, dtype=torch.long).to(torch_device)
+        input_ids[input_ids == config.image_token_index] = self.pad_token_id
+
+        input_ids[:, : self.num_image_tokens] = config.image_token_index
+
         inputs_dict = {
             "pixel_values": pixel_values,
             "image_sizes": torch.tensor(
@@ -165,220 +183,140 @@ class LlavaNextForConditionalGenerationModelTest(ModelTesterMixin, GenerationTes
     Model tester for `LlavaNextForConditionalGeneration`.
     """
 
-    all_model_classes = (LlavaNextForConditionalGeneration,) if is_torch_available() else ()
-    test_pruning = False
-    test_head_masking = False
+    all_model_classes = (
+        (
+            LlavaNextModel,
+            LlavaNextForConditionalGeneration,
+        )
+        if is_torch_available()
+        else ()
+    )
+    pipeline_model_mapping = (
+        {
+            "image-text-to-text": LlavaNextForConditionalGeneration,
+            "any-to-any": LlavaNextForConditionalGeneration,
+        }
+        if is_torch_available()
+        else {}
+    )
+    _is_composite = True
 
     def setUp(self):
         self.model_tester = LlavaNextVisionText2TextModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=LlavaNextConfig, has_text_modality=False)
+        common_properties = ["image_token_index", "vision_feature_layer", "image_seq_length"]
+        self.config_tester = ConfigTester(
+            self, config_class=LlavaNextConfig, has_text_modality=False, common_properties=common_properties
+        )
 
-    def test_initialization(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
+    def test_config(self):
+        self.config_tester.run_common_tests()
 
-        configs_no_init = _config_zero_init(config)
+    def test_mismatching_num_image_tokens(self):
+        """
+        Tests that VLMs through an error with explicit message saying what is wrong
+        when number of images don't match number of image tokens in the text.
+        Also we need to test multi-image cases when one prompr has multiple image tokens.
+        """
+        config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
         for model_class in self.all_model_classes:
-            model = model_class(config=configs_no_init)
-            for name, param in model.named_parameters():
-                if "image_newline" in name:
-                    continue
-                elif param.requires_grad:
-                    self.assertIn(
-                        ((param.data.mean() * 1e9).round() / 1e9).item(),
-                        [0.0, 1.0],
-                        msg=f"Parameter {name} of model {model_class} seems not properly initialized",
-                    )
+            model = model_class(config).to(torch_device)
+            model.eval()
+            curr_input_dict = copy.deepcopy(input_dict)  # in=place modifications further
+            _ = model(**curr_input_dict)  # successful forward with no modifications
+
+            # remove one image but leave the image token in text
+            curr_input_dict["pixel_values"] = curr_input_dict["pixel_values"][-1:, ...]
+            curr_input_dict["image_sizes"] = curr_input_dict["image_sizes"][-1:, ...]
+            with self.assertRaises(ValueError):
+                _ = model(**curr_input_dict)
+
+            # simulate multi-image case by concatenating inputs where each has exactly one image/image-token
+            input_ids = curr_input_dict["input_ids"][:1]
+            pixel_values = curr_input_dict["pixel_values"][:1]
+            image_sizes = curr_input_dict["image_sizes"][:1]
+            input_ids = torch.cat([input_ids, input_ids], dim=0)
+
+            # one image and two image tokens raise an error
+            with self.assertRaises(ValueError):
+                _ = model(input_ids=input_ids, pixel_values=pixel_values, image_sizes=image_sizes)
+
+            # two images and two image tokens don't raise an error
+            pixel_values = torch.cat([pixel_values, pixel_values], dim=0)
+            image_sizes = torch.cat([image_sizes, image_sizes], dim=0)
+            _ = model(input_ids=input_ids, pixel_values=pixel_values, image_sizes=image_sizes)
+
+    def test_odd_sized_image(self):
+        # prepare model configuration
+        config = self.model_tester.get_config()
+
+        # prepare input
+        num_image_tokens = 24
+        pixel_values = floats_tensor([1, 5, 3, config.vision_config.image_size, config.vision_config.image_size])
+        input_ids = ids_tensor([1, 64], config.text_config.vocab_size - 2) + 2
+        input_ids[:, :num_image_tokens] = config.image_token_index
+        attention_mask = torch.ones(input_ids.shape, dtype=torch.long).to(torch_device)
+        inputs_dict = {
+            "pixel_values": pixel_values,
+            "image_sizes": torch.tensor([[13, 16]]),  # odd-sized image
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+
+        # forward with odd-sized image input
+        for model_class in self.all_model_classes:
+            model = model_class(config).to(torch_device)
+            model(**inputs_dict)
+
+    @parameterized.expand(
+        [
+            (-1,),
+            ([-1],),
+            ([-1, -2],),
+        ],
+    )
+    def test_vision_feature_layers(self, vision_feature_layer):
+        """
+        Test that we can use either one vision feature layer, or a list of
+        vision feature layers.
+        """
+        config, input_dict = self.model_tester.prepare_config_and_inputs_for_common()
+        config.vision_feature_layer = vision_feature_layer
+
+        num_feature_layers = 1 if isinstance(vision_feature_layer, int) else len(vision_feature_layer)
+        hidden_size = config.vision_config.hidden_size
+        expected_features = hidden_size * num_feature_layers
+
+        for model_class in self.all_model_classes:
+            model = model_class(config).to(torch_device)
+            # We should have the right number of input features,
+            # and should be able to run a forward pass without exploding
+            base_model = getattr(model, "model", model)
+            assert base_model.multi_modal_projector.linear_1.in_features == expected_features
+            model(**input_dict)
 
     @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
     )
     def test_training_gradient_checkpointing(self):
         pass
 
     @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
     )
     def test_training_gradient_checkpointing_use_reentrant(self):
         pass
 
     @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
     )
     def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
 
-    @unittest.skip(reason="Feedforward chunking is not yet supported")
-    def test_feed_forward_chunking(self):
+    @unittest.skip(
+        "VLMs need lots of steps to prepare images/mask correctly to get pad-free inputs. Can be tested as part of LLM test"
+    )
+    def test_flash_attention_2_padding_matches_padding_free_with_position_ids(self):
         pass
-
-    @unittest.skip(reason="CPU offload is not yet supported")
-    def test_cpu_offload(self):
-        pass
-
-    # Copied from tests.test_modeling_common.ModelTesterMixin.test_resize_tokens_embeddings with config.vocab_size->config.text_config.vocab_size
-    def test_resize_tokens_embeddings(self):
-        (
-            original_config,
-            inputs_dict,
-        ) = self.model_tester.prepare_config_and_inputs_for_common()
-        if not self.test_resize_embeddings:
-            return
-
-        for model_class in self.all_model_classes:
-            config = copy.deepcopy(original_config)
-            model = model_class(config)
-            model.to(torch_device)
-
-            if self.model_tester.is_training is False:
-                model.eval()
-
-            model_vocab_size = config.text_config.vocab_size
-            # Retrieve the embeddings and clone theme
-            model_embed = model.resize_token_embeddings(model_vocab_size)
-            cloned_embeddings = model_embed.weight.clone()
-
-            # Check that resizing the token embeddings with a larger vocab size increases the model's vocab size
-            model_embed = model.resize_token_embeddings(model_vocab_size + 10)
-            self.assertEqual(model.config.text_config.vocab_size, model_vocab_size + 10)
-            # Check that it actually resizes the embeddings matrix
-            self.assertEqual(model_embed.weight.shape[0], cloned_embeddings.shape[0] + 10)
-            # Check that the model can still do a forward pass successfully (every parameter should be resized)
-            model(**self._prepare_for_class(inputs_dict, model_class))
-
-            # Check that resizing the token embeddings with a smaller vocab size decreases the model's vocab size
-            model_embed = model.resize_token_embeddings(model_vocab_size - 15)
-            self.assertEqual(model.config.text_config.vocab_size, model_vocab_size - 15)
-            # Check that it actually resizes the embeddings matrix
-            self.assertEqual(model_embed.weight.shape[0], cloned_embeddings.shape[0] - 15)
-
-            # Check that the model can still do a forward pass successfully (every parameter should be resized)
-            # Input ids should be clamped to the maximum size of the vocabulary
-            inputs_dict["input_ids"].clamp_(max=model_vocab_size - 15 - 1)
-
-            # make sure that decoder_input_ids are resized as well
-            if "decoder_input_ids" in inputs_dict:
-                inputs_dict["decoder_input_ids"].clamp_(max=model_vocab_size - 15 - 1)
-            model(**self._prepare_for_class(inputs_dict, model_class))
-
-            # Check that adding and removing tokens has not modified the first part of the embedding matrix.
-            models_equal = True
-            for p1, p2 in zip(cloned_embeddings, model_embed.weight):
-                if p1.data.ne(p2.data).sum() > 0:
-                    models_equal = False
-
-            self.assertTrue(models_equal)
-
-            config = copy.deepcopy(original_config)
-            model = model_class(config)
-            model.to(torch_device)
-
-            model_vocab_size = config.text_config.vocab_size
-            model.resize_token_embeddings(model_vocab_size + 10, pad_to_multiple_of=1)
-            self.assertTrue(model.config.text_config.vocab_size + 10, model_vocab_size)
-
-            model_embed = model.resize_token_embeddings(model_vocab_size, pad_to_multiple_of=64)
-            self.assertTrue(model_embed.weight.shape[0] // 64, 0)
-
-            self.assertTrue(model_embed.weight.shape[0], model.config.text_config.vocab_size)
-            self.assertTrue(model.config.text_config.vocab_size, model.vocab_size)
-
-            model_embed = model.resize_token_embeddings(model_vocab_size + 13, pad_to_multiple_of=64)
-            self.assertTrue(model_embed.weight.shape[0] // 64, 0)
-
-            # Check that resizing a model to a multiple of pad_to_multiple leads to a model of exactly that size
-            target_dimension = 128
-            model_embed = model.resize_token_embeddings(target_dimension, pad_to_multiple_of=64)
-            self.assertTrue(model_embed.weight.shape[0], target_dimension)
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "Asking to pad the embedding matrix to a multiple of `1.3`, which is not and integer. Please make sure to pass an integer",
-            ):
-                model.resize_token_embeddings(model_vocab_size, pad_to_multiple_of=1.3)
-
-    # Copied from tests.test_modeling_common.ModelTesterMixin.test_resize_embeddings_untied with config.vocab_size->config.text_config.vocab_size
-    def test_resize_embeddings_untied(self):
-        (
-            original_config,
-            inputs_dict,
-        ) = self.model_tester.prepare_config_and_inputs_for_common()
-        if not self.test_resize_embeddings:
-            return
-
-        original_config.tie_word_embeddings = False
-
-        # if model cannot untied embeddings -> leave test
-        if original_config.tie_word_embeddings:
-            return
-
-        for model_class in self.all_model_classes:
-            config = copy.deepcopy(original_config)
-            model = model_class(config).to(torch_device)
-
-            # if no output embeddings -> leave test
-            if model.get_output_embeddings() is None:
-                continue
-
-            # Check that resizing the token embeddings with a larger vocab size increases the model's vocab size
-            model_vocab_size = config.text_config.vocab_size
-            model.resize_token_embeddings(model_vocab_size + 10)
-            self.assertEqual(model.config.text_config.vocab_size, model_vocab_size + 10)
-            output_embeds = model.get_output_embeddings()
-            self.assertEqual(output_embeds.weight.shape[0], model_vocab_size + 10)
-            # Check bias if present
-            if output_embeds.bias is not None:
-                self.assertEqual(output_embeds.bias.shape[0], model_vocab_size + 10)
-            # Check that the model can still do a forward pass successfully (every parameter should be resized)
-            model(**self._prepare_for_class(inputs_dict, model_class))
-
-            # Check that resizing the token embeddings with a smaller vocab size decreases the model's vocab size
-            model.resize_token_embeddings(model_vocab_size - 15)
-            self.assertEqual(model.config.text_config.vocab_size, model_vocab_size - 15)
-            # Check that it actually resizes the embeddings matrix
-            output_embeds = model.get_output_embeddings()
-            self.assertEqual(output_embeds.weight.shape[0], model_vocab_size - 15)
-            # Check bias if present
-            if output_embeds.bias is not None:
-                self.assertEqual(output_embeds.bias.shape[0], model_vocab_size - 15)
-            # Check that the model can still do a forward pass successfully (every parameter should be resized)
-            # Input ids should be clamped to the maximum size of the vocabulary
-            inputs_dict["input_ids"].clamp_(max=model_vocab_size - 15 - 1)
-            if "decoder_input_ids" in inputs_dict:
-                inputs_dict["decoder_input_ids"].clamp_(max=model_vocab_size - 15 - 1)
-            # Check that the model can still do a forward pass successfully (every parameter should be resized)
-            model(**self._prepare_for_class(inputs_dict, model_class))
-
-    # Copied from tests.test_modeling_common.ModelTesterMixin.test_tie_model_weights with config.vocab_size->config.text_config.vocab_size
-    def test_tie_model_weights(self):
-        if not self.test_torchscript:
-            return
-
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-
-        def check_same_values(layer_1, layer_2):
-            equal = True
-            for p1, p2 in zip(layer_1.weight, layer_2.weight):
-                if p1.data.ne(p2.data).sum() > 0:
-                    equal = False
-            return equal
-
-        for model_class in self.all_model_classes:
-            config.torchscript = True
-            model_not_tied = model_class(config)
-            if model_not_tied.get_output_embeddings() is None:
-                continue
-
-            config_tied = copy.deepcopy(config)
-            config_tied.torchscript = False
-            model_tied = model_class(config_tied)
-            params_tied = list(model_tied.parameters())
-            # Check that the embedding layer and decoding layer are the same in size and in value
-            # self.assertTrue(check_same_values(embeddings, decoding))
-
-            # Check that after resize they remain tied.
-            model_tied.resize_token_embeddings(config.text_config.vocab_size + 10)
-            params_tied_2 = list(model_tied.parameters())
-            self.assertEqual(len(params_tied_2), len(params_tied))
 
 
 @require_torch
@@ -391,47 +329,46 @@ class LlavaNextForConditionalGenerationIntegrationTest(unittest.TestCase):
         self.prompt = "[INST] <image>\nWhat is shown in this image? [/INST]"
 
     def tearDown(self):
-        gc.collect()
-        torch.cuda.empty_cache()
+        cleanup(torch_device, gc_collect=True)
 
     @slow
     @require_bitsandbytes
     def test_small_model_integration_test(self):
         model = LlavaNextForConditionalGeneration.from_pretrained(
             "llava-hf/llava-v1.6-mistral-7b-hf",
-            load_in_4bit=True,
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
         )
 
-        inputs = self.processor(self.prompt, self.image, return_tensors="pt")
+        inputs = self.processor(images=self.image, text=self.prompt, return_tensors="pt").to(torch_device)
 
         # verify inputs against original implementation
-        filepath = hf_hub_download(repo_id="nielsr/test-image", filename="llava_1_6_input_ids.pt", repo_type="dataset")
-        original_input_ids = torch.load(filepath, map_location="cpu")
+        filepath = hf_hub_download(
+            repo_id="nielsr/test-image",
+            filename="llava_1_6_input_ids.pt",
+            repo_type="dataset",
+        )
+        check_torch_load_is_safe()
+        original_input_ids = torch.load(filepath, map_location="cpu", weights_only=True)
         # replace -200 by image_token_index (since we use token ID = 32000 for the image token)
-        original_input_ids[original_input_ids == -200] = model.config.image_token_index
-        assert original_input_ids[0].tolist() == inputs.input_ids[0].tolist()
+        # remove image token indices because HF impl expands image tokens `image_seq_length` times
+        original_input_ids = original_input_ids[original_input_ids != -200]
+        observed_input_ids = inputs.input_ids[inputs.input_ids != model.config.image_token_index]
+        assert original_input_ids[0].tolist() == observed_input_ids[0].tolist()
 
         filepath = hf_hub_download(
-            repo_id="nielsr/test-image", filename="llava_1_6_pixel_values.pt", repo_type="dataset"
+            repo_id="nielsr/test-image",
+            filename="llava_1_6_pixel_values.pt",
+            repo_type="dataset",
         )
-        original_pixel_values = torch.load(filepath, map_location="cpu")
-        assert torch.allclose(original_pixel_values, inputs.pixel_values.half())
-
-        # verify single forward pass
-        inputs = inputs.to(torch_device)
-        with torch.no_grad():
-            output = model(**inputs)
-
-        expected_slice = torch.tensor(
-            [[-4.7695, -4.5664, -0.2786], [-10.6250, -10.8906, -2.5254], [-6.7383, -7.2461, -0.6787]],
-            dtype=torch.float32,
-            device=torch_device,
+        check_torch_load_is_safe()
+        original_pixel_values = torch.load(filepath, map_location="cpu", weights_only=True)
+        assert torch.allclose(
+            original_pixel_values, inputs.pixel_values.to(device="cpu", dtype=original_pixel_values.dtype)
         )
-        assert torch.allclose(output.logits[0, :3, :3], expected_slice, atol=1e-3)
 
         # verify generation
         output = model.generate(**inputs, max_new_tokens=100)
-        EXPECTED_DECODED_TEXT = '[INST]  \nWhat is shown in this image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot that displays values for multiple quantitative variables represented on axes starting from the same point. This particular radar chart is showing the performance of various models or systems across different metrics or datasets.\n\nThe chart is divided into several sections, each representing a different model or dataset. The axes represent different metrics or datasets, such as "MMM-Vet," "MMM-Bench," "L'  # fmt: skip
+        EXPECTED_DECODED_TEXT = '[INST]  \nWhat is shown in this image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot that displays values for multiple quantitative variables represented on axes starting from the same point. This particular radar chart is showing the performance of various models or systems across different metrics or datasets.\n\nThe chart is divided into several sections, each representing a different model or dataset. The axes represent different metrics or datasets, such as "MMM-Vet," "MMM-Bench," "L'
 
         self.assertEqual(
             self.processor.decode(output[0], skip_special_tokens=True),
@@ -442,20 +379,159 @@ class LlavaNextForConditionalGenerationIntegrationTest(unittest.TestCase):
     @require_bitsandbytes
     def test_small_model_integration_test_batch(self):
         model = LlavaNextForConditionalGeneration.from_pretrained(
-            "llava-hf/llava-v1.6-mistral-7b-hf", load_in_4bit=True
+            "llava-hf/llava-v1.6-mistral-7b-hf", quantization_config=BitsAndBytesConfig(load_in_4bit=True)
         )
         url = "http://images.cocodataset.org/val2017/000000039769.jpg"
         cats_image = Image.open(requests.get(url, stream=True).raw)
 
         inputs = self.processor(
-            [self.prompt, self.prompt], images=[self.image, cats_image], return_tensors="pt", padding=True
+            images=[self.image, cats_image],
+            text=[self.prompt, self.prompt],
+            return_tensors="pt",
+            padding=True,
         ).to(torch_device)
 
-        # make sure image_sizes are the same
-        # as otherwise batched generation doesn't work
-        inputs.image_sizes[1] = inputs.image_sizes[0]
-
+        # it should not matter whether two images are the same size or not
         output = model.generate(**inputs, max_new_tokens=20)
 
         EXPECTED_DECODED_TEXT = ['[INST]  \nWhat is shown in this image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot that displays', '[INST]  \nWhat is shown in this image? [/INST] The image shows two cats lying on a pink surface, which appears to be a couch or a cush']  # fmt: skip
-        self.assertEqual(self.processor.batch_decode(output, skip_special_tokens=True), EXPECTED_DECODED_TEXT)
+        self.assertEqual(
+            self.processor.batch_decode(output, skip_special_tokens=True),
+            EXPECTED_DECODED_TEXT,
+        )
+
+    @slow
+    @require_bitsandbytes
+    def test_small_model_integration_test_unk_token(self):
+        # related to (#29835)
+        model = LlavaNextForConditionalGeneration.from_pretrained(
+            "llava-hf/llava-v1.6-mistral-7b-hf",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
+        )
+
+        prompt_with_unk = "[INST] <image>\nWhat is shown in this <unk> image? [/INST]"
+        inputs = self.processor(images=self.image, text=prompt_with_unk, return_tensors="pt")
+
+        # verify single forward pass
+        inputs = inputs.to(torch_device)
+        with torch.no_grad():
+            output = model(**inputs)
+
+        # verify generation
+        output = model.generate(**inputs, max_new_tokens=40)
+        EXPECTED_DECODED_TEXT = '[INST]  \nWhat is shown in this   image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot that displays values for multiple quantitative variables represented on axes starting from the same point. This particular radar chart'  # fmt: skip
+
+        self.assertEqual(
+            self.processor.decode(output[0], skip_special_tokens=True),
+            EXPECTED_DECODED_TEXT,
+        )
+
+    @slow
+    @require_bitsandbytes
+    def test_small_model_integration_test_batch_different_resolutions(self):
+        model = LlavaNextForConditionalGeneration.from_pretrained(
+            "llava-hf/llava-v1.6-mistral-7b-hf",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
+        )
+
+        url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+        lowres_url = "https://4.img-dpreview.com/files/p/TS560x560~forums/56876524/03975b28741443319e9a94615e35667e"
+        cats_image = Image.open(requests.get(url, stream=True).raw)
+        lowres_img = Image.open(requests.get(lowres_url, stream=True).raw)
+
+        inputs = self.processor(
+            images=[lowres_img, cats_image], text=[self.prompt, self.prompt], return_tensors="pt", padding=True
+        ).to(torch_device)
+        pixel_values = inputs["pixel_values"]
+
+        # verify pixel values are padded correctly with 0 when one image has more num_patches than the other
+        image_num_patches = [
+            image_size_to_num_patches(
+                image_size=imsize,
+                grid_pinpoints=model.config.image_grid_pinpoints,
+                patch_size=model.config.vision_config.image_size,
+            )
+            for imsize in inputs["image_sizes"]
+        ]
+        for pix_val, num_patch in zip(pixel_values, image_num_patches):
+            self.assertTrue(torch.all(pix_val[num_patch:] == 0))  # pad on the right
+            for i in range(num_patch):
+                self.assertFalse(torch.all(pix_val[i : i + 1] == 0))  # no padding expected in any of patches
+
+        # verify generation
+        output = model.generate(**inputs, max_new_tokens=50)
+        EXPECTED_DECODED_TEXT = "[INST]  \nWhat is shown in this image? [/INST] The image shows two deer, likely fawns, in a grassy area with trees in the background. The setting appears to be a forest or woodland, and the photo is taken during what seems to be either dawn or dusk, given"
+        self.assertEqual(
+            self.processor.decode(output[0], skip_special_tokens=True),
+            EXPECTED_DECODED_TEXT,
+        )
+
+    @slow
+    @require_bitsandbytes
+    def test_small_model_integration_test_batch_matches_single(self):
+        model = LlavaNextForConditionalGeneration.from_pretrained(
+            "llava-hf/llava-v1.6-mistral-7b-hf",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
+        )
+
+        url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+        lowres_url = "https://4.img-dpreview.com/files/p/TS560x560~forums/56876524/03975b28741443319e9a94615e35667e"
+        cats_image = Image.open(requests.get(url, stream=True).raw)
+        lowres_img = Image.open(requests.get(lowres_url, stream=True).raw)
+
+        inputs_batched = self.processor(
+            images=[lowres_img, cats_image], text=[self.prompt, self.prompt], return_tensors="pt", padding=True
+        ).to(torch_device)
+
+        inputs_single = self.processor(images=lowres_img, text=self.prompt, return_tensors="pt", padding=True).to(
+            torch_device
+        )
+
+        # verify generation
+        output_batched = model.generate(**inputs_batched, max_new_tokens=50)
+        output_single = model.generate(**inputs_single, max_new_tokens=50)
+        self.assertEqual(
+            self.processor.decode(output_batched[0], skip_special_tokens=True),
+            self.processor.decode(output_single[0], skip_special_tokens=True),
+        )
+
+    @slow
+    @require_bitsandbytes
+    def test_small_model_integration_test_full_vision_state_selection(self):
+        model = LlavaNextForConditionalGeneration.from_pretrained(
+            "llava-hf/llava-v1.6-mistral-7b-hf",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
+        )
+        # test that changing `strategy` won't error out
+        model.vision_feature_select_strategy = "full"
+
+        inputs = self.processor(text=self.prompt, images=self.image, return_tensors="pt").to(model.device)
+
+        # verify generation
+        output = model.generate(**inputs, max_new_tokens=30)
+        EXPECTED_DECODED_TEXT = '[INST]  \nWhat is shown in this image? [/INST] The image appears to be a radar chart, which is a type of multi-dimensional plot that displays values for multiple quantitative variables represented on axes'  # fmt: skip
+
+        self.assertEqual(
+            self.processor.decode(output[0], skip_special_tokens=True),
+            EXPECTED_DECODED_TEXT,
+        )
+
+    @slow
+    def test_granite_vision(self):
+        """
+        Check the expected output of a granite vision model, which leverages
+        multiple vision feature layers and a visual encoder with no CLS (siglip).
+        """
+        granite_model_path = "ibm-granite/granite-vision-3.1-2b-preview"
+        model = LlavaNextForConditionalGeneration.from_pretrained(granite_model_path)
+        self.processor = AutoProcessor.from_pretrained(granite_model_path)
+        prompt = "<|user|>\n<image>\nWhat is shown in this image?\n<|assistant|>\n"
+        inputs = self.processor(text=prompt, images=self.image, return_tensors="pt").to(model.device)
+
+        # verify generation
+        output = model.generate(**inputs, max_new_tokens=30)
+        EXPECTED_DECODED_TEXT = "<|user|>\n\nWhat is shown in this image?\n<|assistant|>\nThe image displays a radar chart comparing the performance of various machine learning models."  # fmt: skip
+        self.assertEqual(
+            self.processor.decode(output[0], skip_special_tokens=True),
+            EXPECTED_DECODED_TEXT,
+        )

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,16 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Testing suite for the PyTorch ViLT model. """
+"""Testing suite for the PyTorch ViLT model."""
 
 import unittest
+from functools import cached_property
 
 from datasets import load_dataset
 from packaging import version
 
 from transformers import ViltConfig, is_torch_available, is_vision_available
 from transformers.testing_utils import require_torch, require_vision, slow, torch_device
-from transformers.utils import cached_property
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, random_attention_mask
@@ -230,9 +229,7 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
         if is_torch_available()
         else {}
     )
-    test_pruning = False
-    test_headmasking = False
-    test_torchscript = False
+
     model_split_percents = [0.5, 0.8, 0.9]
 
     # ViltForMaskedLM, ViltForQuestionAnswering and ViltForImagesAndTextClassification require special treatment
@@ -272,7 +269,7 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
 
     def test_training(self):
         if not self.model_tester.is_training:
-            return
+            self.skipTest(reason="model_tester.is_training is set to False.")
 
         for model_class in self.all_model_classes:
             config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -296,7 +293,7 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
 
     def test_training_gradient_checkpointing(self):
         if not self.model_tester.is_training:
-            return
+            self.skipTest(reason="model_tester.is_training is set to False.")
 
         for model_class in self.all_model_classes:
             config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -319,13 +316,13 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
             loss.backward()
 
     @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
     )
     def test_training_gradient_checkpointing_use_reentrant(self):
         pass
 
     @unittest.skip(
-        reason="This architecure seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
+        reason="This architecture seem to not compute gradients properly when using GC, check: https://github.com/huggingface/transformers/pull/27124"
     )
     def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
@@ -357,6 +354,13 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     def test_model_outputs_equivalence(self):
         pass
 
+    @unittest.skip(
+        reason="""VilT samples image tokens from a multinomial distribution, resulting in not deterministic
+                            hidden states. Cannot test equivalence on logit level"""
+    )
+    def test_inputs_embeds_matches_input_ids(self):
+        pass
+
     def test_attention_outputs(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
         config.return_dict = True
@@ -367,7 +371,8 @@ class ViltModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
             inputs_dict["output_attentions"] = True
             inputs_dict["output_hidden_states"] = False
             config.return_dict = True
-            model = model_class(config)
+            model = model_class._from_config(config, attn_implementation="eager")
+            config = model.config
             model.to(torch_device)
             model.eval()
             with torch.no_grad():
@@ -540,11 +545,11 @@ class ViltForImagesAndTextClassificationModelTest(ViltModelTest, unittest.TestCa
         self.model_tester = ViltModelTester(self, modality_type_vocab_size=3, add_multiple_images=True, num_images=2)
         self.config_tester = ConfigTester(self, config_class=ViltConfig, hidden_size=37)
 
-    @unittest.skip("We only test the model that takes in multiple images")
+    @unittest.skip(reason="We only test the model that takes in multiple images")
     def test_model(self):
         pass
 
-    @unittest.skip("We only test the model that takes in multiple images")
+    @unittest.skip(reason="We only test the model that takes in multiple images")
     def test_for_token_classification(self):
         pass
 
@@ -580,7 +585,7 @@ class ViltModelIntegrationTest(unittest.TestCase):
         self.assertEqual(outputs.logits.shape, expected_shape)
 
         expected_slice = torch.tensor([-12.5061, -12.5123, -12.5174]).to(torch_device)
-        self.assertTrue(torch.allclose(outputs.logits[0, 0, :3], expected_slice, atol=1e-4))
+        torch.testing.assert_close(outputs.logits[0, 0, :3], expected_slice, rtol=1e-4, atol=1e-4)
 
         # verify masked token prediction equals "cats"
         predicted_id = outputs.logits[0, 4, :].argmax(-1).item()
@@ -605,7 +610,7 @@ class ViltModelIntegrationTest(unittest.TestCase):
 
         expected_slice = torch.tensor([-15.9495, -18.1472, -10.3041]).to(torch_device)
 
-        self.assertTrue(torch.allclose(outputs.logits[0, :3], expected_slice, atol=1e-4))
+        torch.testing.assert_close(outputs.logits[0, :3], expected_slice, rtol=1e-4, atol=1e-4)
 
         # compute loss
         vqa_labels = [[2, 3, 155, 800]]
@@ -630,9 +635,9 @@ class ViltModelIntegrationTest(unittest.TestCase):
 
         processor = self.default_processor
 
-        dataset = load_dataset("hf-internal-testing/fixtures_nlvr2", split="test")
-        image1 = Image.open(dataset[0]["file"]).convert("RGB")
-        image2 = Image.open(dataset[1]["file"]).convert("RGB")
+        dataset = load_dataset("hf-internal-testing/fixtures_nlvr2", split="train")
+        image1 = dataset[0]["image"]
+        image2 = dataset[1]["image"]
 
         text = (
             "The left image contains twice the number of dogs as the right image, and at least two dogs in total are"
@@ -666,4 +671,4 @@ class ViltModelIntegrationTest(unittest.TestCase):
                 device=torch_device,
             )
 
-        self.assertTrue(torch.allclose(outputs.logits[0, :3], expected_slice, atol=1e-4))
+        torch.testing.assert_close(outputs.logits[0, :3], expected_slice, rtol=1e-4, atol=1e-4)

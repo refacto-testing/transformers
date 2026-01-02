@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" LUKE configuration"""
+"""LUKE configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import LUKE_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class LukeConfig(PretrainedConfig):
+class LukeConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`LukeModel`]. It is used to instantiate a LUKE
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the LUKE
     [studio-ousia/luke-base](https://huggingface.co/studio-ousia/luke-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -71,7 +68,7 @@ class LukeConfig(PretrainedConfig):
         use_entity_aware_attention (`bool`, *optional*, defaults to `True`):
             Whether or not the model should use the entity-aware self-attention mechanism proposed in [LUKE: Deep
             Contextualized Entity Representations with Entity-aware Self-attention (Yamada et
-            al.)](https://arxiv.org/abs/2010.01057).
+            al.)](https://huggingface.co/papers/2010.01057).
         classifier_dropout (`float`, *optional*):
             The dropout ratio for the classification head.
         pad_token_id (`int`, *optional*, defaults to 1):
@@ -140,3 +137,6 @@ class LukeConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.use_entity_aware_attention = use_entity_aware_attention
         self.classifier_dropout = classifier_dropout
+
+
+__all__ = ["LukeConfig"]

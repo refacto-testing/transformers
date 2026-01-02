@@ -12,34 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND=, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" TVP model configuration"""
+"""TVP model configuration"""
 
-import copy
-
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
-from ..auto import CONFIG_MAPPING
+from ...utils.backbone_utils import verify_backbone_config_arguments
+from ..auto import CONFIG_MAPPING, AutoConfig
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import TVP_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class TvpConfig(PretrainedConfig):
+class TvpConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`TvpModel`]. It is used to instantiate an Tvp
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the Tvp
     [Intel/tvp-base](https://huggingface.co/Intel/tvp-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
-        backbone_config (`PretrainedConfig` or `dict`, *optional*):
+        backbone_config (`Union[dict, "PreTrainedConfig"]`, *optional*, defaults to `ResNetConfig()`):
             The configuration of the backbone model.
         backbone (`str`, *optional*):
             Name of backbone to use when `backbone_config` is `None`. If `use_pretrained_backbone` is `True`, this
@@ -72,6 +68,8 @@ class TvpConfig(PretrainedConfig):
         vocab_size (`int`, *optional*, defaults to 30522):
             Vocabulary size of the Tvp text model. Defines the number of different tokens that can be represented by
             the `inputs_ids` passed when calling [`TvpModel`].
+        type_vocab_size (`int`, *optional*, defaults to 2):
+            The vocabulary size of the `token_type_ids` passed when calling [`TvpModel`].
         hidden_size (`int`, *optional*, defaults to 768):
             Dimensionality of the encoder layers.
         intermediate_size (`int`, *optional*, defaults to 3072):
@@ -91,7 +89,7 @@ class TvpConfig(PretrainedConfig):
             The dropout probability of hidden layers.
         hidden_act (`str` or `function`, *optional*, defaults to `"gelu"`):
             The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
-            `"relu"`, `"selu"` and `"gelu_new"` ``"quick_gelu"` are supported.
+            `"relu"`, `"selu"` and `"gelu_new"` `"quick_gelu"` are supported.
         layer_norm_eps (`float`, *optional*, defaults to 1e-12):
             The epsilon used by the layer normalization layers.
         initializer_range (`float`, *optional*, defaults to 0.02):
@@ -101,6 +99,7 @@ class TvpConfig(PretrainedConfig):
     """
 
     model_type = "tvp"
+    sub_configs = {"backbone_config": AutoConfig}
 
     def __init__(
         self,
@@ -117,6 +116,7 @@ class TvpConfig(PretrainedConfig):
         max_img_size=448,
         num_frames=48,
         vocab_size=30522,
+        type_vocab_size=2,
         hidden_size=768,
         intermediate_size=3072,
         num_hidden_layers=12,
@@ -131,13 +131,6 @@ class TvpConfig(PretrainedConfig):
         attention_probs_dropout_prob=0.1,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-        if use_pretrained_backbone:
-            raise ValueError("Pretrained backbones are not supported yet.")
-
-        if backbone_config is not None and backbone is not None:
-            raise ValueError("You can't specify both `backbone` and `backbone_config`.")
-
         if backbone_config is None and backbone is None:
             logger.info("`backbone_config` is `None`. Initializing the config with the default `ResNet` backbone.")
             backbone_config = CONFIG_MAPPING["resnet"](out_features=["stage4"])
@@ -146,8 +139,13 @@ class TvpConfig(PretrainedConfig):
             config_class = CONFIG_MAPPING[backbone_model_type]
             backbone_config = config_class.from_dict(backbone_config)
 
-        if backbone_kwargs is not None and backbone_kwargs and backbone_config is not None:
-            raise ValueError("You can't specify both `backbone_kwargs` and `backbone_config`.")
+        verify_backbone_config_arguments(
+            use_timm_backbone=use_timm_backbone,
+            use_pretrained_backbone=use_pretrained_backbone,
+            backbone=backbone,
+            backbone_config=backbone_config,
+            backbone_kwargs=backbone_kwargs,
+        )
 
         self.backbone_config = backbone_config
         self.backbone = backbone
@@ -162,6 +160,7 @@ class TvpConfig(PretrainedConfig):
         self.max_img_size = max_img_size
         self.num_frames = num_frames
         self.vocab_size = vocab_size
+        self.type_vocab_size = type_vocab_size
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
@@ -175,27 +174,7 @@ class TvpConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.attention_probs_dropout_prob = attention_probs_dropout_prob
 
-    @classmethod
-    def from_backbone_config(cls, backbone_config: PretrainedConfig, **kwargs):
-        """Instantiate a [`TvpConfig`] (or a derived class) from a pre-trained backbone model configuration.
+        super().__init__(**kwargs)
 
-        Args:
-            backbone_config ([`PretrainedConfig`]):
-                The backbone configuration.
-        Returns:
-            [`TvpConfig`]: An instance of a configuration object
-        """
-        return cls(backbone_config=backbone_config, **kwargs)
 
-    def to_dict(self):
-        """
-        Serializes this instance to a Python dictionary. Override the default [`~PretrainedConfig.to_dict`].
-
-        Returns:
-            `Dict[str, any]`: Dictionary of all the attributes that make up this configuration instance,
-        """
-        output = copy.deepcopy(self.__dict__)
-        if output["backbone_config"] is not None:
-            output["backbone_config"] = self.backbone_config.to_dict()
-        output["model_type"] = self.__class__.model_type
-        return output
+__all__ = ["TvpConfig"]

@@ -23,12 +23,14 @@ from tests.trainer.test_trainer import TrainerIntegrationCommon  # noqa
 from transformers import is_torch_available
 from transformers.testing_utils import (
     TestCasePlus,
+    backend_device_count,
     execute_subprocess_async,
-    get_gpu_count,
     get_tests_dir,
     require_deepspeed,
-    require_torch_gpu,
+    require_torch_accelerator,
+    run_first,
     slow,
+    torch_device,
 )
 from transformers.trainer_utils import set_seed
 
@@ -143,7 +145,7 @@ def get_launcher(distributed=False):
     # - it won't be able to handle that
     # 2. for now testing with just 2 gpus max (since some quality tests may give different
     # results with mode gpus because we use very little data)
-    num_gpus = min(2, get_gpu_count()) if distributed else 1
+    num_gpus = min(2, backend_device_count(torch_device)) if distributed else 1
     master_port = os.environ.get("DS_TEST_PORT", DEFAULT_MASTER_PORT)
     return f"deepspeed --num_nodes 1 --num_gpus {num_gpus} --master_port {master_port}".split()
 
@@ -159,7 +161,6 @@ def make_task_cmds():
         --num_train_epochs 1
         --fp16
         --report_to none
-        --overwrite_output_dir
         """.split()
 
     # try to cover as many models as possible once (it's enough to run on one task per model)
@@ -181,7 +182,7 @@ def make_task_cmds():
             "pegasus",
         ],
         "clm": [
-            "big_bird",
+            # "big_bird", not use why there is an issue with the architecture, some modules are not ZeROOrderedDict suddenly
             "bigbird_pegasus",
             "blenderbot",
             "bloom",
@@ -325,8 +326,9 @@ params = list(itertools.product(stages, task_cmds.keys()))
 
 
 @slow
+@run_first
 @require_deepspeed
-@require_torch_gpu
+@require_torch_accelerator
 class TestDeepSpeedModelZoo(TestCasePlus):
     """This class is for testing via an external script - can do multiple gpus"""
 

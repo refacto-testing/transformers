@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" ViT MAE model configuration"""
+"""ViT MAE model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import VIT_MAE_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class ViTMAEConfig(PretrainedConfig):
+class ViTMAEConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`ViTMAEModel`]. It is used to instantiate an ViT
     MAE model according to the specified arguments, defining the model architecture. Instantiating a configuration with
     the defaults will yield a similar configuration to that of the ViT
     [facebook/vit-mae-base](https://huggingface.co/facebook/vit-mae-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -138,3 +135,6 @@ class ViTMAEConfig(PretrainedConfig):
         self.decoder_intermediate_size = decoder_intermediate_size
         self.mask_ratio = mask_ratio
         self.norm_pix_loss = norm_pix_loss
+
+
+__all__ = ["ViTMAEConfig"]

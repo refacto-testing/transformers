@@ -12,20 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Audio Spectogram Transformer (AST) model configuration"""
+"""Audio Spectogram Transformer (AST) model configuration"""
 
+from typing import Any
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import AUDIO_SPECTROGRAM_TRANSFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class ASTConfig(PretrainedConfig):
+class ASTConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`ASTModel`]. It is used to instantiate an AST
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
@@ -33,8 +31,8 @@ class ASTConfig(PretrainedConfig):
     [MIT/ast-finetuned-audioset-10-10-0.4593](https://huggingface.co/MIT/ast-finetuned-audioset-10-10-0.4593)
     architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         hidden_size (`int`, *optional*, defaults to 768):
@@ -122,3 +120,12 @@ class ASTConfig(PretrainedConfig):
         self.time_stride = time_stride
         self.max_length = max_length
         self.num_mel_bins = num_mel_bins
+
+    # Overwritten from the parent class: AST is not compatible with `generate`, but has a config parameter sharing the
+    # same name (`max_length`). Sharing the same name triggers checks regarding the config -> generation_config
+    # generative parameters deprecation cycle, overwriting this function prevents this from happening.
+    def _get_non_default_generation_parameters(self) -> dict[str, Any]:
+        return {}
+
+
+__all__ = ["ASTConfig"]

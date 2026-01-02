@@ -13,27 +13,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" RWKV configuration"""
+"""RWKV configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import RWKV_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class RwkvConfig(PretrainedConfig):
+class RwkvConfig(PreTrainedConfig):
     """
     This is the configuration class to store the configuration of a [`RwkvModel`]. It is used to instantiate a RWKV
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the RWVK-4
     [RWKV/rwkv-4-169m-pile](https://huggingface.co/RWKV/rwkv-4-169m-pile) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -41,7 +38,7 @@ class RwkvConfig(PretrainedConfig):
             Vocabulary size of the RWKV model. Defines the number of different tokens that can be represented by the
             `inputs_ids` passed when calling [`RwkvModel`].
         context_length (`int`, *optional*, defaults to 1024):
-            The maximum sequence length that this model can be be used with in a single forward (using it in RNN mode
+            The maximum sequence length that this model can be used with in a single forward (using it in RNN mode
             lets use any sequence length).
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimensionality of the embeddings and hidden states.
@@ -60,7 +57,7 @@ class RwkvConfig(PretrainedConfig):
             The id of the end of sentence token in the vocabulary. Defaults to 0 as RWKV uses the same tokenizer as
             GPTNeoX.
         rescale_every (`int`, *optional*, defaults to 6):
-            At inference, the hidden states (and weights of the correponding output layers) are divided by 2 every
+            At inference, the hidden states (and weights of the corresponding output layers) are divided by 2 every
             `rescale_every` layer. If set to 0 or a negative number, no rescale is done.
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether or not to tie the word embeddings with the input token embeddings.
@@ -118,3 +115,6 @@ class RwkvConfig(PretrainedConfig):
         super().__init__(
             tie_word_embeddings=tie_word_embeddings, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs
         )
+
+
+__all__ = ["RwkvConfig"]

@@ -14,7 +14,7 @@
 # limitations under the License.
 """Image processor class for SegGPT."""
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -26,10 +26,9 @@ from ...image_utils import (
     ChannelDimension,
     ImageInput,
     PILImageResampling,
-    get_channel_dimension_axis,
     infer_channel_dimension_format,
     is_scaled_image,
-    make_list_of_images,
+    make_flat_list_of_images,
     to_numpy_array,
     valid_images,
 )
@@ -43,9 +42,9 @@ if is_torch_available():
 logger = logging.get_logger(__name__)
 
 
-# See https://arxiv.org/pdf/2212.02499.pdf  at 3.1 Redefining Output Spaces as "Images" - Semantic Segmentation from PAINTER paper
+# See https://huggingface.co/papers/2212.02499  at 3.1 Redefining Output Spaces as "Images" - Semantic Segmentation from PAINTER paper
 # Taken from https://github.com/Abdullah-Meda/Painter/blob/main/Painter/data/coco_semseg/gen_color_coco_panoptic_segm.py#L31
-def build_palette(num_labels: int) -> List[Tuple[int, int]]:
+def build_palette(num_labels: int) -> list[tuple[int, int]]:
     base = int(num_labels ** (1 / 3)) + 1
     margin = 256 // base
 
@@ -65,29 +64,10 @@ def build_palette(num_labels: int) -> List[Tuple[int, int]]:
     return color_list
 
 
-def get_num_channels(image: np.ndarray, input_data_format: ChannelDimension) -> int:
-    if image.ndim == 2:
-        return 0
-
-    channel_idx = get_channel_dimension_axis(image, input_data_format)
-    return image.shape[channel_idx]
-
-
 def mask_to_rgb(
-    mask: np.ndarray,
-    palette: Optional[List[Tuple[int, int]]] = None,
-    input_data_format: Optional[ChannelDimension] = None,
-    data_format: Optional[ChannelDimension] = None,
+    mask: np.ndarray, palette: Optional[list[tuple[int, int]]] = None, data_format: Optional[ChannelDimension] = None
 ) -> np.ndarray:
-    if input_data_format is None and mask.ndim > 2:
-        input_data_format = infer_channel_dimension_format(mask)
-
-    data_format = data_format if data_format is not None else input_data_format
-
-    num_channels = get_num_channels(mask, input_data_format)
-
-    if num_channels == 3:
-        return to_channel_dimension_format(mask, data_format, input_data_format) if data_format is not None else mask
+    data_format = data_format if data_format is not None else ChannelDimension.FIRST
 
     if palette is not None:
         height, width = mask.shape
@@ -109,9 +89,7 @@ def mask_to_rgb(
     else:
         rgb_mask = np.repeat(mask[None, ...], 3, axis=0)
 
-    return (
-        to_channel_dimension_format(rgb_mask, data_format, input_data_format) if data_format is not None else rgb_mask
-    )
+    return to_channel_dimension_format(rgb_mask, data_format)
 
 
 class SegGptImageProcessor(BaseImageProcessor):
@@ -137,12 +115,15 @@ class SegGptImageProcessor(BaseImageProcessor):
         do_normalize (`bool`, *optional*, defaults to `True`):
             Whether to normalize the image. Can be overridden by the `do_normalize` parameter in the `preprocess`
             method.
-        image_mean (`float` or `List[float]`, *optional*, defaults to `IMAGENET_DEFAULT_MEAN`):
+        image_mean (`float` or `list[float]`, *optional*, defaults to `IMAGENET_DEFAULT_MEAN`):
             Mean to use if normalizing the image. This is a float or list of floats the length of the number of
             channels in the image. Can be overridden by the `image_mean` parameter in the `preprocess` method.
-        image_std (`float` or `List[float]`, *optional*, defaults to `IMAGENET_DEFAULT_STD`):
+        image_std (`float` or `list[float]`, *optional*, defaults to `IMAGENET_DEFAULT_STD`):
             Standard deviation to use if normalizing the image. This is a float or list of floats the length of the
             number of channels in the image. Can be overridden by the `image_std` parameter in the `preprocess` method.
+        do_convert_rgb (`bool`, *optional*, defaults to `True`):
+            Whether to convert the prompt mask to RGB format. Can be overridden by the `do_convert_rgb` parameter in the
+            `preprocess` method.
     """
 
     model_input_names = ["pixel_values"]
@@ -150,13 +131,14 @@ class SegGptImageProcessor(BaseImageProcessor):
     def __init__(
         self,
         do_resize: bool = True,
-        size: Optional[Dict[str, int]] = None,
+        size: Optional[dict[str, int]] = None,
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
         rescale_factor: Union[int, float] = 1 / 255,
         do_normalize: bool = True,
-        image_mean: Optional[Union[float, List[float]]] = None,
-        image_std: Optional[Union[float, List[float]]] = None,
+        image_mean: Optional[Union[float, list[float]]] = None,
+        image_std: Optional[Union[float, list[float]]] = None,
+        do_convert_rgb: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -170,8 +152,9 @@ class SegGptImageProcessor(BaseImageProcessor):
         self.rescale_factor = rescale_factor
         self.image_mean = image_mean if image_mean is not None else IMAGENET_DEFAULT_MEAN
         self.image_std = image_std if image_std is not None else IMAGENET_DEFAULT_STD
+        self.do_convert_rgb = do_convert_rgb
 
-    def get_palette(self, num_labels: int) -> List[Tuple[int, int]]:
+    def get_palette(self, num_labels: int) -> list[tuple[int, int]]:
         """Build a palette to map the prompt mask from a single channel to a 3 channel RGB.
 
         Args:
@@ -179,23 +162,22 @@ class SegGptImageProcessor(BaseImageProcessor):
                 Number of classes in the segmentation task (excluding the background).
 
         Returns:
-            `List[Tuple[int, int]]`: Palette to map the prompt mask from a single channel to a 3 channel RGB.
+            `list[tuple[int, int]]`: Palette to map the prompt mask from a single channel to a 3 channel RGB.
         """
         return build_palette(num_labels)
 
     def mask_to_rgb(
         self,
         image: np.ndarray,
-        palette: Optional[List[Tuple[int, int]]] = None,
+        palette: Optional[list[tuple[int, int]]] = None,
         data_format: Optional[Union[str, ChannelDimension]] = None,
-        input_data_format: Optional[Union[str, ChannelDimension]] = None,
     ) -> np.ndarray:
-        """Convert a mask to RGB format.
+        """Converts a segmentation map to RGB format.
 
         Args:
             image (`np.ndarray`):
-                Mask to convert to RGB format. If the mask is already in RGB format, it will be passed through.
-            palette (`List[Tuple[int, int]]`, *optional*, defaults to `None`):
+                Segmentation map with dimensions (height, width) where pixel values represent the class index.
+            palette (`list[tuple[int, int]]`, *optional*, defaults to `None`):
                 Palette to use to convert the mask to RGB format. If unset, the mask is duplicated across the channel
                 dimension.
             data_format (`ChannelDimension` or `str`, *optional*):
@@ -203,27 +185,17 @@ class SegGptImageProcessor(BaseImageProcessor):
                 image is used. Can be one of:
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
-            input_data_format (`ChannelDimension` or `str`, *optional*):
-                The channel dimension format for the input image. If unset, the channel dimension format is inferred
-                from the input image. Can be one of:
-                - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
-                - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
 
         Returns:
             `np.ndarray`: The mask in RGB format.
         """
-        return mask_to_rgb(
-            image,
-            palette=palette,
-            data_format=data_format,
-            input_data_format=input_data_format,
-        )
+        return mask_to_rgb(image, palette=palette, data_format=data_format)
 
     # Copied from transformers.models.vit.image_processing_vit.ViTImageProcessor.resize with PILImageResampling.BILINEAR->PILImageResampling.BICUBIC
     def resize(
         self,
         image: np.ndarray,
-        size: Dict[str, int],
+        size: dict[str, int],
         resample: PILImageResampling = PILImageResampling.BICUBIC,
         data_format: Optional[Union[str, ChannelDimension]] = None,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
@@ -235,7 +207,7 @@ class SegGptImageProcessor(BaseImageProcessor):
         Args:
             image (`np.ndarray`):
                 Image to resize.
-            size (`Dict[str, int]`):
+            size (`dict[str, int]`):
                 Dictionary in the format `{"height": int, "width": int}` specifying the size of the output image.
             resample (`PILImageResampling`, *optional*, defaults to `PILImageResampling.BICUBIC`):
                 `PILImageResampling` filter to use when resizing the image e.g. `PILImageResampling.BICUBIC`.
@@ -271,17 +243,17 @@ class SegGptImageProcessor(BaseImageProcessor):
     def _preprocess_step(
         self,
         images: ImageInput,
-        is_mask: bool = False,
         do_resize: Optional[bool] = None,
-        size: Dict[str, int] = None,
-        resample: PILImageResampling = None,
+        size: Optional[dict[str, int]] = None,
+        resample: Optional[PILImageResampling] = None,
         do_rescale: Optional[bool] = None,
         rescale_factor: Optional[float] = None,
         do_normalize: Optional[bool] = None,
-        image_mean: Optional[Union[float, List[float]]] = None,
-        image_std: Optional[Union[float, List[float]]] = None,
+        image_mean: Optional[Union[float, list[float]]] = None,
+        image_std: Optional[Union[float, list[float]]] = None,
         data_format: Union[str, ChannelDimension] = ChannelDimension.FIRST,
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        do_convert_rgb: Optional[bool] = None,
         num_labels: Optional[int] = None,
         **kwargs,
     ):
@@ -292,12 +264,9 @@ class SegGptImageProcessor(BaseImageProcessor):
             images (`ImageInput`):
                 Image to _preprocess. Expects a single or batch of images with pixel values ranging from 0 to 255. If
                 passing in images with pixel values between 0 and 1, set `do_rescale=False`.
-            is_mask (`bool`, *optional*, defaults to `False`):
-                Whether the image is a mask. If True, the image is converted to RGB using the palette if
-                `self.num_labels` is specified otherwise RGB is achieved by duplicating the channel.
             do_resize (`bool`, *optional*, defaults to `self.do_resize`):
                 Whether to resize the image.
-            size (`Dict[str, int]`, *optional*, defaults to `self.size`):
+            size (`dict[str, int]`, *optional*, defaults to `self.size`):
                 Dictionary in the format `{"height": h, "width": w}` specifying the size of the output image after
                 resizing.
             resample (`PILImageResampling` filter, *optional*, defaults to `self.resample`):
@@ -309,17 +278,15 @@ class SegGptImageProcessor(BaseImageProcessor):
                 Rescale factor to rescale the image by if `do_rescale` is set to `True`.
             do_normalize (`bool`, *optional*, defaults to `self.do_normalize`):
                 Whether to normalize the image.
-            image_mean (`float` or `List[float]`, *optional*, defaults to `self.image_mean`):
+            image_mean (`float` or `list[float]`, *optional*, defaults to `self.image_mean`):
                 Image mean to use if `do_normalize` is set to `True`.
-            image_std (`float` or `List[float]`, *optional*, defaults to `self.image_std`):
+            image_std (`float` or `list[float]`, *optional*, defaults to `self.image_std`):
                 Image standard deviation to use if `do_normalize` is set to `True`.
             return_tensors (`str` or `TensorType`, *optional*):
                 The type of tensors to return. Can be one of:
                 - Unset: Return a list of `np.ndarray`.
-                - `TensorType.TENSORFLOW` or `'tf'`: Return a batch of type `tf.Tensor`.
                 - `TensorType.PYTORCH` or `'pt'`: Return a batch of type `torch.Tensor`.
                 - `TensorType.NUMPY` or `'np'`: Return a batch of type `np.ndarray`.
-                - `TensorType.JAX` or `'jax'`: Return a batch of type `jax.numpy.ndarray`.
             data_format (`ChannelDimension` or `str`, *optional*, defaults to `ChannelDimension.FIRST`):
                 The channel dimension format for the output image. Can be one of:
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
@@ -331,6 +298,10 @@ class SegGptImageProcessor(BaseImageProcessor):
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
+            do_convert_rgb (`bool`, *optional*, defaults to `self.do_convert_rgb`):
+                Whether to convert the prompt mask to RGB format. If `num_labels` is specified, a palette will be built
+                to map the prompt mask from a single channel to a 3 channel RGB. If unset, the prompt mask is duplicated
+                across the channel dimension. Must be set to `False` if the prompt mask is already in RGB format.
             num_labels: (`int`, *optional*):
                 Number of classes in the segmentation task (excluding the background). If specified, a palette will be
                 built, assuming that class_idx 0 is the background, to map the prompt mask from a single class_idx
@@ -340,6 +311,7 @@ class SegGptImageProcessor(BaseImageProcessor):
         do_resize = do_resize if do_resize is not None else self.do_resize
         do_rescale = do_rescale if do_rescale is not None else self.do_rescale
         do_normalize = do_normalize if do_normalize is not None else self.do_normalize
+        do_convert_rgb = do_convert_rgb if do_convert_rgb is not None else self.do_convert_rgb
         resample = resample if resample is not None else self.resample
         rescale_factor = rescale_factor if rescale_factor is not None else self.rescale_factor
         image_mean = image_mean if image_mean is not None else self.image_mean
@@ -348,13 +320,11 @@ class SegGptImageProcessor(BaseImageProcessor):
         size = size if size is not None else self.size
         size_dict = get_size_dict(size)
 
-        images = make_list_of_images(images)
+        # If segmentation map is passed we expect 2D images
+        images = make_flat_list_of_images(images, expected_ndims=2 if do_convert_rgb else 3)
 
         if not valid_images(images):
-            raise ValueError(
-                "Invalid image type. Must be of type PIL.Image.Image, numpy.ndarray, "
-                "torch.Tensor, tf.Tensor or jax.ndarray."
-            )
+            raise ValueError("Invalid image type. Must be of type PIL.Image.Image, numpy.ndarray, or torch.Tensor")
 
         if do_resize and size is None:
             raise ValueError("Size must be specified if do_resize is True.")
@@ -368,17 +338,17 @@ class SegGptImageProcessor(BaseImageProcessor):
         # All transformations expect numpy arrays.
         images = [to_numpy_array(image) for image in images]
 
-        if is_scaled_image(images[0]) and do_rescale:
+        if do_rescale and is_scaled_image(images[0]):
             logger.warning_once(
                 "It looks like you are trying to rescale already rescaled images. If the input"
                 " images have pixel values between 0 and 1, set `do_rescale=False` to avoid rescaling them again."
             )
 
-        if input_data_format is None and not is_mask:
+        if input_data_format is None and not do_convert_rgb:
             # We assume that all images have the same channel dimension format.
             input_data_format = infer_channel_dimension_format(images[0])
 
-        if is_mask:
+        if do_convert_rgb:
             palette = self.get_palette(num_labels) if num_labels is not None else None
             # Since this is the input for the next transformations its format should be the same as the input_data_format
             images = [
@@ -416,13 +386,14 @@ class SegGptImageProcessor(BaseImageProcessor):
         prompt_images: Optional[ImageInput] = None,
         prompt_masks: Optional[ImageInput] = None,
         do_resize: Optional[bool] = None,
-        size: Dict[str, int] = None,
-        resample: PILImageResampling = None,
+        size: Optional[dict[str, int]] = None,
+        resample: Optional[PILImageResampling] = None,
         do_rescale: Optional[bool] = None,
         rescale_factor: Optional[float] = None,
         do_normalize: Optional[bool] = None,
-        image_mean: Optional[Union[float, List[float]]] = None,
-        image_std: Optional[Union[float, List[float]]] = None,
+        image_mean: Optional[Union[float, list[float]]] = None,
+        image_std: Optional[Union[float, list[float]]] = None,
+        do_convert_rgb: Optional[bool] = None,
         num_labels: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         data_format: Union[str, ChannelDimension] = ChannelDimension.FIRST,
@@ -440,12 +411,15 @@ class SegGptImageProcessor(BaseImageProcessor):
                 Prompt image to _preprocess. Expects a single or batch of images with pixel values ranging from 0 to 255. If
                 passing in images with pixel values between 0 and 1, set `do_rescale=False`.
             prompt_masks (`ImageInput`):
-                Prompt mask from prompt image to _preprocess. Expects a single or batch of masks. If the mask masks are
-                a single channel then it will be converted to RGB using the palette if `self.num_labels` is specified
-                or by just repeating the channel if not. If the mask is already in RGB format, it will be passed through.
+                Prompt mask from prompt image to _preprocess that specify prompt_masks value in the preprocessed output.
+                Can either be in the format of segmentation maps (no channels) or RGB images. If in the format of
+                RGB images, `do_convert_rgb` should be set to `False`. If in the format of segmentation maps, `num_labels`
+                specifying `num_labels` is recommended to build a palette to map the prompt mask from a single channel to
+                a 3 channel RGB. If `num_labels` is not specified, the prompt mask will be duplicated across the channel
+                dimension.
             do_resize (`bool`, *optional*, defaults to `self.do_resize`):
                 Whether to resize the image.
-            size (`Dict[str, int]`, *optional*, defaults to `self.size`):
+            size (`dict[str, int]`, *optional*, defaults to `self.size`):
                 Dictionary in the format `{"height": h, "width": w}` specifying the size of the output image after
                 resizing.
             resample (`PILImageResampling` filter, *optional*, defaults to `self.resample`):
@@ -457,17 +431,25 @@ class SegGptImageProcessor(BaseImageProcessor):
                 Rescale factor to rescale the image by if `do_rescale` is set to `True`.
             do_normalize (`bool`, *optional*, defaults to `self.do_normalize`):
                 Whether to normalize the image.
-            image_mean (`float` or `List[float]`, *optional*, defaults to `self.image_mean`):
+            image_mean (`float` or `list[float]`, *optional*, defaults to `self.image_mean`):
                 Image mean to use if `do_normalize` is set to `True`.
-            image_std (`float` or `List[float]`, *optional*, defaults to `self.image_std`):
+            image_std (`float` or `list[float]`, *optional*, defaults to `self.image_std`):
                 Image standard deviation to use if `do_normalize` is set to `True`.
+            do_convert_rgb (`bool`, *optional*, defaults to `self.do_convert_rgb`):
+                Whether to convert the prompt mask to RGB format. If `num_labels` is specified, a palette will be built
+                to map the prompt mask from a single channel to a 3 channel RGB. If unset, the prompt mask is duplicated
+                across the channel dimension. Must be set to `False` if the prompt mask is already in RGB format.
+            num_labels: (`int`, *optional*):
+                Number of classes in the segmentation task (excluding the background). If specified, a palette will be
+                built, assuming that class_idx 0 is the background, to map the prompt mask from a plain segmentation map
+                with no channels to a 3 channel RGB. Not specifying this will result in the prompt mask either being passed
+                through as is if it is already in RGB format (if `do_convert_rgb` is false) or being duplicated
+                across the channel dimension.
             return_tensors (`str` or `TensorType`, *optional*):
                 The type of tensors to return. Can be one of:
                 - Unset: Return a list of `np.ndarray`.
-                - `TensorType.TENSORFLOW` or `'tf'`: Return a batch of type `tf.Tensor`.
                 - `TensorType.PYTORCH` or `'pt'`: Return a batch of type `torch.Tensor`.
                 - `TensorType.NUMPY` or `'np'`: Return a batch of type `np.ndarray`.
-                - `TensorType.JAX` or `'jax'`: Return a batch of type `jax.numpy.ndarray`.
             data_format (`ChannelDimension` or `str`, *optional*, defaults to `ChannelDimension.FIRST`):
                 The channel dimension format for the output image. Can be one of:
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
@@ -479,11 +461,6 @@ class SegGptImageProcessor(BaseImageProcessor):
                 - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
-            num_labels: (`int`, *optional*):
-                Number of classes in the segmentation task (excluding the background). If specified, a palette will be
-                built, assuming that class_idx 0 is the background, to map the prompt mask from a single class_idx
-                channel to a 3 channel RGB. Not specifying this will result in the prompt mask either being passed
-                through as is if it is already in RGB format or being duplicated across the channel dimension.
         """
         if all(v is None for v in [images, prompt_images, prompt_masks]):
             raise ValueError("At least one of images, prompt_images, prompt_masks must be specified.")
@@ -502,6 +479,7 @@ class SegGptImageProcessor(BaseImageProcessor):
                 do_normalize=do_normalize,
                 image_mean=image_mean,
                 image_std=image_std,
+                do_convert_rgb=False,
                 data_format=data_format,
                 input_data_format=input_data_format,
                 **kwargs,
@@ -521,6 +499,7 @@ class SegGptImageProcessor(BaseImageProcessor):
                 do_normalize=do_normalize,
                 image_mean=image_mean,
                 image_std=image_std,
+                do_convert_rgb=False,
                 data_format=data_format,
                 input_data_format=input_data_format,
                 **kwargs,
@@ -531,7 +510,6 @@ class SegGptImageProcessor(BaseImageProcessor):
         if prompt_masks is not None:
             prompt_masks = self._preprocess_step(
                 prompt_masks,
-                is_mask=True,
                 do_resize=do_resize,
                 size=size,
                 resample=PILImageResampling.NEAREST,
@@ -540,9 +518,10 @@ class SegGptImageProcessor(BaseImageProcessor):
                 do_normalize=do_normalize,
                 image_mean=image_mean,
                 image_std=image_std,
+                do_convert_rgb=do_convert_rgb,
+                num_labels=num_labels,
                 data_format=data_format,
                 input_data_format=input_data_format,
-                num_labels=num_labels,
                 **kwargs,
             )
 
@@ -551,7 +530,7 @@ class SegGptImageProcessor(BaseImageProcessor):
         return BatchFeature(data=data, tensor_type=return_tensors)
 
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: Optional[List[Tuple[int, int]]] = None, num_labels: Optional[int] = None
+        self, outputs, target_sizes: Optional[list[tuple[int, int]]] = None, num_labels: Optional[int] = None
     ):
         """
         Converts the output of [`SegGptImageSegmentationOutput`] into segmentation maps. Only supports
@@ -560,15 +539,15 @@ class SegGptImageProcessor(BaseImageProcessor):
         Args:
             outputs ([`SegGptImageSegmentationOutput`]):
                 Raw outputs of the model.
-            target_sizes (`List[Tuple[int, int]]`, *optional*):
-                List of length (batch_size), where each list item (`Tuple[int, int]`) corresponds to the requested
+            target_sizes (`list[tuple[int, int]]`, *optional*):
+                List of length (batch_size), where each list item (`tuple[int, int]`) corresponds to the requested
                 final size (height, width) of each prediction. If left to None, predictions will not be resized.
             num_labels (`int`, *optional*):
                 Number of classes in the segmentation task (excluding the background). If specified, a palette will be
                 built, assuming that class_idx 0 is the background, to map prediction masks from RGB values to class
                 indices. This value should be the same used when preprocessing inputs.
         Returns:
-            semantic_segmentation: `List[torch.Tensor]` of length `batch_size`, where each item is a semantic
+            semantic_segmentation: `list[torch.Tensor]` of length `batch_size`, where each item is a semantic
             segmentation map of shape (height, width) corresponding to the target_sizes entry (if `target_sizes` is
             specified). Each entry of each `torch.Tensor` correspond to a semantic class id.
         """
@@ -597,7 +576,7 @@ class SegGptImageProcessor(BaseImageProcessor):
         palette_tensor = None
         palette = self.get_palette(num_labels) if num_labels is not None else None
         if palette is not None:
-            palette_tensor = torch.tensor(palette).float().to(masks.device)
+            palette_tensor = torch.tensor(palette).to(device=masks.device, dtype=torch.float)
             _, num_channels, _, _ = masks.shape
             palette_tensor = palette_tensor.view(1, 1, num_labels + 1, num_channels)
 
@@ -624,3 +603,6 @@ class SegGptImageProcessor(BaseImageProcessor):
             semantic_segmentation.append(pred)
 
         return semantic_segmentation
+
+
+__all__ = ["SegGptImageProcessor"]

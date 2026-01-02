@@ -13,11 +13,11 @@
 # limitations under the License.
 import inspect
 import unittest
-from typing import List
+from functools import cached_property
 
 from transformers.models.superpoint.configuration_superpoint import SuperPointConfig
-from transformers.testing_utils import require_torch, require_vision, slow, torch_device
-from transformers.utils import cached_property, is_torch_available, is_vision_available
+from transformers.testing_utils import is_flaky, require_torch, require_vision, slow, torch_device
+from transformers.utils import is_torch_available, is_vision_available
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor
@@ -27,7 +27,6 @@ if is_torch_available():
     import torch
 
     from transformers import (
-        SUPERPOINT_PRETRAINED_MODEL_ARCHIVE_LIST,
         SuperPointForKeypointDetection,
     )
 
@@ -44,7 +43,7 @@ class SuperPointModelTester:
         batch_size=3,
         image_width=80,
         image_height=60,
-        encoder_hidden_sizes: List[int] = [32, 32, 64, 64],
+        encoder_hidden_sizes: list[int] = [32, 32, 64, 64],
         decoder_hidden_size: int = 128,
         keypoint_decoder_dim: int = 65,
         descriptor_decoder_dim: int = 128,
@@ -85,13 +84,17 @@ class SuperPointModelTester:
             border_removal_distance=self.border_removal_distance,
         )
 
-    def create_and_check_model(self, config, pixel_values):
+    def create_and_check_keypoint_detection(self, config, pixel_values):
         model = SuperPointForKeypointDetection(config=config)
         model.to(torch_device)
         model.eval()
         result = model(pixel_values)
+        self.parent.assertEqual(result.keypoints.shape[0], self.batch_size)
+        self.parent.assertEqual(result.keypoints.shape[-1], 2)
+
+        result = model(pixel_values, output_hidden_states=True)
         self.parent.assertEqual(
-            result.last_hidden_state.shape,
+            result.hidden_states[-1].shape,
             (
                 self.batch_size,
                 self.encoder_hidden_sizes[-1],
@@ -110,55 +113,53 @@ class SuperPointModelTester:
 @require_torch
 class SuperPointModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (SuperPointForKeypointDetection,) if is_torch_available() else ()
-    all_generative_model_classes = () if is_torch_available() else ()
 
-    fx_compatible = False
-    test_pruning = False
     test_resize_embeddings = False
-    test_head_masking = False
     has_attentions = False
+    from_pretrained_id = "magic-leap-community/superpoint"
 
     def setUp(self):
         self.model_tester = SuperPointModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=SuperPointConfig, has_text_modality=False, hidden_size=37)
+        self.config_tester = ConfigTester(
+            self,
+            config_class=SuperPointConfig,
+            has_text_modality=False,
+            hidden_size=37,
+            common_properties=["encoder_hidden_sizes", "decoder_hidden_size"],
+        )
 
     def test_config(self):
-        self.create_and_test_config_common_properties()
-        self.config_tester.create_and_test_config_to_json_string()
-        self.config_tester.create_and_test_config_to_json_file()
-        self.config_tester.create_and_test_config_from_and_save_pretrained()
-        self.config_tester.create_and_test_config_with_num_labels()
-        self.config_tester.check_config_can_be_init_without_params()
-        self.config_tester.check_config_arguments_init()
+        self.config_tester.run_common_tests()
 
-    def create_and_test_config_common_properties(self):
-        return
+    @is_flaky(description="The `indices` computed with `topk()` in `top_k_keypoints` is not stable.")
+    def test_batching_equivalence(self):
+        super().test_batching_equivalence()
 
     @unittest.skip(reason="SuperPointForKeypointDetection does not use inputs_embeds")
     def test_inputs_embeds(self):
         pass
 
     @unittest.skip(reason="SuperPointForKeypointDetection does not support input and output embeddings")
-    def test_model_common_attributes(self):
+    def test_model_get_set_embeddings(self):
         pass
 
     @unittest.skip(reason="SuperPointForKeypointDetection does not use feedforward chunking")
     def test_feed_forward_chunking(self):
         pass
 
-    @unittest.skip(reason="SuperPointForKeypointDetection is not trainable")
+    @unittest.skip(reason="SuperPointForKeypointDetection does not support training")
     def test_training(self):
         pass
 
-    @unittest.skip(reason="SuperPointForKeypointDetection is not trainable")
+    @unittest.skip(reason="SuperPointForKeypointDetection does not support training")
     def test_training_gradient_checkpointing(self):
         pass
 
-    @unittest.skip(reason="SuperPointForKeypointDetection is not trainable")
+    @unittest.skip(reason="SuperPointForKeypointDetection does not support training")
     def test_training_gradient_checkpointing_use_reentrant(self):
         pass
 
-    @unittest.skip(reason="SuperPointForKeypointDetection is not trainable")
+    @unittest.skip(reason="SuperPointForKeypointDetection does not support training")
     def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
 
@@ -166,9 +167,9 @@ class SuperPointModelTest(ModelTesterMixin, unittest.TestCase):
     def test_retain_grad_hidden_states_attentions(self):
         pass
 
-    def test_model(self):
+    def test_keypoint_detection(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
-        self.model_tester.create_and_check_model(*config_and_inputs)
+        self.model_tester.create_and_check_keypoint_detection(*config_and_inputs)
 
     def test_forward_signature(self):
         config, _ = self.model_tester.prepare_config_and_inputs()
@@ -218,9 +219,8 @@ class SuperPointModelTest(ModelTesterMixin, unittest.TestCase):
 
     @slow
     def test_model_from_pretrained(self):
-        for model_name in SUPERPOINT_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = SuperPointForKeypointDetection.from_pretrained(model_name)
-            self.assertIsNotNone(model)
+        model = SuperPointForKeypointDetection.from_pretrained(self.from_pretrained_id)
+        self.assertIsNotNone(model)
 
     def test_forward_labels_should_be_none(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -260,7 +260,7 @@ class SuperPointModelIntegrationTest(unittest.TestCase):
         inputs = preprocessor(images=images, return_tensors="pt").to(torch_device)
         with torch.no_grad():
             outputs = model(**inputs)
-        expected_number_keypoints_image0 = 567
+        expected_number_keypoints_image0 = 568
         expected_number_keypoints_image1 = 830
         expected_max_number_keypoints = max(expected_number_keypoints_image0, expected_number_keypoints_image1)
         expected_keypoints_shape = torch.Size((len(images), expected_max_number_keypoints, 2))
@@ -275,11 +275,13 @@ class SuperPointModelIntegrationTest(unittest.TestCase):
         self.assertEqual(outputs.keypoints.shape, expected_keypoints_shape)
         self.assertEqual(outputs.scores.shape, expected_scores_shape)
         self.assertEqual(outputs.descriptors.shape, expected_descriptors_shape)
-        expected_keypoints_image0_values = torch.tensor([[480.0, 9.0], [494.0, 9.0], [489.0, 16.0]]).to(torch_device)
+        expected_keypoints_image0_values = torch.tensor([[0.75, 0.0188], [0.7719, 0.0188], [0.7641, 0.0333]]).to(
+            torch_device
+        )
         expected_scores_image0_values = torch.tensor(
-            [0.0064, 0.0137, 0.0589, 0.0723, 0.5166, 0.0174, 0.1515, 0.2054, 0.0334]
+            [0.0064, 0.0139, 0.0591, 0.0727, 0.5170, 0.0175, 0.1526, 0.2057, 0.0335]
         ).to(torch_device)
-        expected_descriptors_image0_value = torch.tensor(-0.1096).to(torch_device)
+        expected_descriptors_image0_value = torch.tensor(-0.1095).to(torch_device)
         predicted_keypoints_image0_values = outputs.keypoints[0, :3]
         predicted_scores_image0_values = outputs.scores[0, :9]
         predicted_descriptors_image0_value = outputs.descriptors[0, 0, 0]
@@ -291,7 +293,7 @@ class SuperPointModelIntegrationTest(unittest.TestCase):
                 atol=1e-4,
             )
         )
-        self.assertTrue(torch.allclose(predicted_scores_image0_values, expected_scores_image0_values, atol=1e-4))
+        torch.testing.assert_close(predicted_scores_image0_values, expected_scores_image0_values, rtol=1e-4, atol=1e-4)
         self.assertTrue(
             torch.allclose(
                 predicted_descriptors_image0_value,

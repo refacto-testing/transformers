@@ -12,27 +12,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Persimmon model configuration"""
+"""Persimmon model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from typing import Optional
+
+from ...configuration_utils import PreTrainedConfig
+from ...modeling_rope_utils import RopeParameters
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import PERSIMMON_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class PersimmonConfig(PretrainedConfig):
+class PersimmonConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`PersimmonModel`]. It is used to instantiate an
     Persimmon model according to the specified arguments, defining the model architecture. Instantiating a
     configuration with the defaults will yield a similar configuration to that of the
     [adept/persimmon-8b-base](https://huggingface.co/adept/persimmon-8b-base).
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -60,24 +60,16 @@ class PersimmonConfig(PretrainedConfig):
             relevant if `config.is_decoder=True`.
         tie_word_embeddings(`bool`, *optional*, defaults to `False`):
             Whether to tie weight embeddings
-        rope_theta (`float`, *optional*, defaults to 25000.0):
-            The base period of the RoPE embeddings.
-        rope_scaling (`Dict`, *optional*):
-            Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports two scaling
-            strategies: linear and dynamic. Their scaling factor must be a float greater than 1. The expected format is
-            `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum. See the following thread for more information on how
-            these scaling strategies behave:
-            https://www.reddit.com/r/LocalPersimmon/comments/14mrgpr/dynamically_scaled_rope_further_increases/. This
-            is an experimental feature, subject to breaking API changes in future versions.
+        rope_parameters (`RopeParameters`, *optional*):
+            Dictionary containing the configuration parameters for the RoPE embeddings. The dictionary should contain
+            a value for `rope_theta` and optionally parameters used for scaling in case you want to use RoPE
+            with longer `max_position_embeddings`.
         qk_layernorm (`bool`, *optional*, default to `True`):
             Whether or not to normalize the Queries and Keys after projecting the hidden states
         hidden_dropout (`float`, *optional*, default to 0.0):
             The dropout ratio after applying the MLP to the hidden states.
         attention_dropout (`float`, *optional*, default to 0.0):
             The dropout ratio after computing the attention scores.
-        partial_rotary_factor (`float`, *optional*, default to 0.5):
-            Percentage of the query and keys which will have rotary embedding.
 
         Example:
 
@@ -93,26 +85,24 @@ class PersimmonConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vocab_size=262144,
-        hidden_size=4096,
-        intermediate_size=16384,
-        num_hidden_layers=36,
-        num_attention_heads=64,
-        hidden_act="relu2",
-        max_position_embeddings=16384,
-        initializer_range=0.02,
-        layer_norm_eps=1e-5,
-        use_cache=True,
-        tie_word_embeddings=False,
-        rope_theta=25000.0,
-        rope_scaling=None,
-        qk_layernorm=True,
-        hidden_dropout=0.0,
-        attention_dropout=0.0,
-        partial_rotary_factor=0.5,
-        pad_token_id=None,
-        bos_token_id=1,
-        eos_token_id=2,
+        vocab_size: Optional[int] = 262144,
+        hidden_size: Optional[int] = 4096,
+        intermediate_size: Optional[int] = 16384,
+        num_hidden_layers: Optional[int] = 36,
+        num_attention_heads: Optional[int] = 64,
+        hidden_act: Optional[str] = "relu2",
+        max_position_embeddings: Optional[int] = 16384,
+        initializer_range: Optional[float] = 0.02,
+        layer_norm_eps: Optional[int] = 1e-5,
+        use_cache: Optional[bool] = True,
+        tie_word_embeddings: Optional[bool] = False,
+        rope_parameters: Optional[RopeParameters | dict[str, RopeParameters]] = None,
+        qk_layernorm: Optional[bool] = True,
+        hidden_dropout: Optional[float] = 0.0,
+        attention_dropout: Optional[float] = 0.0,
+        pad_token_id: Optional[int] = None,
+        bos_token_id: Optional[int] = 1,
+        eos_token_id: Optional[int] = 2,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -125,13 +115,11 @@ class PersimmonConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
         self.qk_layernorm = qk_layernorm
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
-        self.partial_rotary_factor = partial_rotary_factor
-        self._rope_scaling_validation()
+        self.rope_parameters = rope_parameters
+        kwargs.setdefault("partial_rotary_factor", 0.5)  # assign default for BC
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -141,23 +129,5 @@ class PersimmonConfig(PretrainedConfig):
             **kwargs,
         )
 
-    # Copied from transformers.models.llama.configuration_llama.LlamaConfig._rope_scaling_validation
-    def _rope_scaling_validation(self):
-        """
-        Validate the `rope_scaling` configuration.
-        """
-        if self.rope_scaling is None:
-            return
 
-        if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
-            raise ValueError(
-                "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, " f"got {self.rope_scaling}"
-            )
-        rope_scaling_type = self.rope_scaling.get("type", None)
-        rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
-            raise ValueError(
-                f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
-            )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
+__all__ = ["PersimmonConfig"]

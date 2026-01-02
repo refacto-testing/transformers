@@ -12,30 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Blip model configuration"""
+"""Blip model configuration"""
 
-import os
-from typing import Union
-
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import BLIP_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class BlipTextConfig(PretrainedConfig):
+class BlipTextConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`BlipTextModel`]. It is used to instantiate a BLIP
     text model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the `BlipText` used by the [base
     architectures](https://huggingface.co/Salesforce/blip-vqa-base).
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -57,7 +51,7 @@ class BlipTextConfig(PretrainedConfig):
             just in case (e.g., 512 or 1024 or 2048).
         hidden_act (`str` or `function`, *optional*, defaults to `"gelu"`):
             The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
-            `"relu"`, `"selu"` and `"gelu_new"` ``"gelu"` are supported.
+            `"relu"`, `"selu"` and `"gelu_new"` `"gelu"` are supported.
         layer_norm_eps (`float`, *optional*, defaults to 1e-12):
             The epsilon used by the layer normalization layers.
         hidden_dropout_prob (`float`, *optional*, defaults to 0.0):
@@ -81,7 +75,7 @@ class BlipTextConfig(PretrainedConfig):
         label_smoothing (float, *optional*):
             A float in [0.0, 1.0]. Specifies the amount of smoothing when computing the loss, where 0.0 means no smoothing. The targets
             become a mixture of the original ground truth and a uniform distribution as described in
-            `Rethinking the Inception Architecture for Computer Vision <https://arxiv.org/abs/1512.00567>`__. Default: :math:`0.0`.
+            `Rethinking the Inception Architecture for Computer Vision <https://huggingface.co/papers/1512.00567>`__. Default: :math:`0.0`.
 
     Example:
 
@@ -99,6 +93,7 @@ class BlipTextConfig(PretrainedConfig):
     ```"""
 
     model_type = "blip_text_model"
+    base_config_key = "text_config"
 
     def __init__(
         self,
@@ -149,34 +144,16 @@ class BlipTextConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.label_smoothing = label_smoothing
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
-        cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
-
-        # get the text config dict if we are loading from BlipConfig
-        if config_dict.get("model_type") == "blip":
-            config_dict = config_dict["text_config"]
-
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
-            logger.warning(
-                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
-                f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
-            )
-
-        return cls.from_dict(config_dict, **kwargs)
-
-
-class BlipVisionConfig(PretrainedConfig):
+class BlipVisionConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`BlipVisionModel`]. It is used to instantiate a
     BLIP vision model according to the specified arguments, defining the model architecture. Instantiating a
     configuration defaults will yield a similar configuration to that of the Blip-base
     [Salesforce/blip-vqa-base](https://huggingface.co/Salesforce/blip-vqa-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -194,7 +171,7 @@ class BlipVisionConfig(PretrainedConfig):
             The size (resolution) of each patch.
         hidden_act (`str` or `function`, *optional*, defaults to `"gelu"`):
             The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
-            `"relu"`, `"selu"` and `"gelu_new"` ``"gelu"` are supported.
+            `"relu"`, `"selu"` and `"gelu_new"` `"gelu"` are supported.
         layer_norm_eps (`float`, *optional*, defaults to 1e-5):
             The epsilon used by the layer normalization layers.
         attention_dropout (`float`, *optional*, defaults to 0.0):
@@ -218,6 +195,7 @@ class BlipVisionConfig(PretrainedConfig):
     ```"""
 
     model_type = "blip_vision_model"
+    base_config_key = "vision_config"
 
     def __init__(
         self,
@@ -248,34 +226,16 @@ class BlipVisionConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
-        cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
-
-        # get the vision config dict if we are loading from BlipConfig
-        if config_dict.get("model_type") == "blip":
-            config_dict = config_dict["vision_config"]
-
-        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
-            logger.warning(
-                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
-                f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
-            )
-
-        return cls.from_dict(config_dict, **kwargs)
-
-
-class BlipConfig(PretrainedConfig):
+class BlipConfig(PreTrainedConfig):
     r"""
     [`BlipConfig`] is the configuration class to store the configuration of a [`BlipModel`]. It is used to instantiate
     a BLIP model according to the specified arguments, defining the text model and vision model configs. Instantiating
     a configuration with the defaults will yield a similar configuration to that of the BLIP-base
     [Salesforce/blip-vqa-base](https://huggingface.co/Salesforce/blip-vqa-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         text_config (`dict`, *optional*):
@@ -283,15 +243,15 @@ class BlipConfig(PretrainedConfig):
         vision_config (`dict`, *optional*):
             Dictionary of configuration options used to initialize [`BlipVisionConfig`].
         projection_dim (`int`, *optional*, defaults to 512):
-            Dimentionality of text and vision projection layers.
+            Dimensionality of text and vision projection layers.
         logit_scale_init_value (`float`, *optional*, defaults to 2.6592):
-            The inital value of the *logit_scale* paramter. Default is used as per the original BLIP implementation.
+            The initial value of the *logit_scale* parameter. Default is used as per the original BLIP implementation.
         image_text_hidden_size (`int`, *optional*, defaults to 256):
-            Dimentionality of the hidden state of the image-text fusion layer.
+            Dimensionality of the hidden state of the image-text fusion layer.
         label_smoothing (float, optional, *optional*, defaults to 0.0):
             A float in [0.0, 1.0]. Specifies the amount of smoothing when computing the loss, where 0.0 means no smoothing. The targets
             become a mixture of the original ground truth and a uniform distribution as described in
-            `Rethinking the Inception Architecture for Computer Vision <https://arxiv.org/abs/1512.00567>`__. Default: :math:`0.0`.
+            `Rethinking the Inception Architecture for Computer Vision <https://huggingface.co/papers/1512.00567>`__. Default: :math:`0.0`.
         kwargs (*optional*):
             Dictionary of keyword arguments.
 
@@ -315,10 +275,11 @@ class BlipConfig(PretrainedConfig):
     >>> config_text = BlipTextConfig()
     >>> config_vision = BlipVisionConfig()
 
-    >>> config = BlipConfig.from_text_vision_configs(config_text, config_vision)
+    >>> config = BlipConfig(text_config=config_text, vision_config=config_vision)
     ```"""
 
     model_type = "blip"
+    sub_configs = {"text_config": BlipTextConfig, "vision_config": BlipVisionConfig}
 
     def __init__(
         self,
@@ -330,18 +291,20 @@ class BlipConfig(PretrainedConfig):
         label_smoothing=0.0,
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         if text_config is None:
-            text_config = {}
+            text_config = BlipTextConfig()
             logger.info("`text_config` is `None`. Initializing the `BlipTextConfig` with default values.")
+        elif isinstance(text_config, dict):
+            text_config = BlipTextConfig(**text_config)
 
         if vision_config is None:
-            vision_config = {}
-            logger.info("`vision_config` is `None`. Initializing the `BlipVisionConfig` with default values.")
+            vision_config = BlipVisionConfig()
+            logger.info("`vision_config` is `None`. initializing the `BlipVisionConfig` with default values.")
+        elif isinstance(vision_config, dict):
+            vision_config = BlipVisionConfig(**vision_config)
 
-        self.text_config = BlipTextConfig(**text_config)
-        self.vision_config = BlipVisionConfig(**vision_config)
+        self.text_config = text_config
+        self.vision_config = vision_config
 
         self.text_config.encoder_hidden_size = self.vision_config.hidden_size
 
@@ -351,15 +314,7 @@ class BlipConfig(PretrainedConfig):
         self.initializer_range = 0.02
         self.image_text_hidden_size = image_text_hidden_size
         self.label_smoothing = label_smoothing
+        super().__init__(**kwargs)
 
-    @classmethod
-    def from_text_vision_configs(cls, text_config: BlipTextConfig, vision_config: BlipVisionConfig, **kwargs):
-        r"""
-        Instantiate a [`BlipConfig`] (or a derived class) from blip text model configuration and blip vision model
-        configuration.
 
-        Returns:
-            [`BlipConfig`]: An instance of a configuration object
-        """
-
-        return cls(text_config=text_config.to_dict(), vision_config=vision_config.to_dict(), **kwargs)
+__all__ = ["BlipConfig", "BlipTextConfig", "BlipVisionConfig"]

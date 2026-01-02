@@ -12,40 +12,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" DETR model configuration"""
+"""DETR model configuration"""
 
-from collections import OrderedDict
-from typing import Mapping
-
-from packaging import version
-
-from ...configuration_utils import PretrainedConfig
-from ...onnx import OnnxConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
-from ..auto import CONFIG_MAPPING
+from ...utils.backbone_utils import verify_backbone_config_arguments
+from ..auto import CONFIG_MAPPING, AutoConfig
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import DETR_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class DetrConfig(PretrainedConfig):
+class DetrConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`DetrModel`]. It is used to instantiate a DETR
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the DETR
     [facebook/detr-resnet-50](https://huggingface.co/facebook/detr-resnet-50) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         use_timm_backbone (`bool`, *optional*, defaults to `True`):
             Whether or not to use the `timm` library for the backbone. If set to `False`, will use the [`AutoBackbone`]
             API.
-        backbone_config (`PretrainedConfig` or `dict`, *optional*):
+        backbone_config (`Union[dict, "PreTrainedConfig"]`, *optional*, defaults to `ResNetConfig()`):
             The configuration of the backbone model. Only used in case `use_timm_backbone` is set to `False` in which
             case it will default to `ResNetConfig()`.
         num_channels (`int`, *optional*, defaults to 3):
@@ -54,7 +46,7 @@ class DetrConfig(PretrainedConfig):
             Number of object queries, i.e. detection slots. This is the maximal number of objects [`DetrModel`] can
             detect in a single image. For COCO, we recommend 100 queries.
         d_model (`int`, *optional*, defaults to 256):
-            Dimension of the layers.
+            This parameter is a general dimension parameter, defining dimensions for components such as the encoder layer and projection parameters in the decoder layer, among others.
         encoder_layers (`int`, *optional*, defaults to 6):
             Number of encoder layers.
         decoder_layers (`int`, *optional*, defaults to 6):
@@ -81,10 +73,10 @@ class DetrConfig(PretrainedConfig):
         init_xavier_std (`float`, *optional*, defaults to 1):
             The scaling factor used for the Xavier initialization gain in the HM Attention map module.
         encoder_layerdrop (`float`, *optional*, defaults to 0.0):
-            The LayerDrop probability for the encoder. See the [LayerDrop paper](see https://arxiv.org/abs/1909.11556)
+            The LayerDrop probability for the encoder. See the [LayerDrop paper](see https://huggingface.co/papers/1909.11556)
             for more details.
         decoder_layerdrop (`float`, *optional*, defaults to 0.0):
-            The LayerDrop probability for the decoder. See the [LayerDrop paper](see https://arxiv.org/abs/1909.11556)
+            The LayerDrop probability for the decoder. See the [LayerDrop paper](see https://huggingface.co/papers/1909.11556)
             for more details.
         auxiliary_loss (`bool`, *optional*, defaults to `False`):
             Whether auxiliary decoding losses (loss at each decoder layer) are to be used.
@@ -135,6 +127,7 @@ class DetrConfig(PretrainedConfig):
     ```"""
 
     model_type = "detr"
+    sub_configs = {"backbone_config": AutoConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
     attribute_map = {
         "hidden_size": "d_model",
@@ -179,21 +172,16 @@ class DetrConfig(PretrainedConfig):
         eos_coefficient=0.1,
         **kwargs,
     ):
-        if not use_timm_backbone and use_pretrained_backbone:
-            raise ValueError(
-                "Loading pretrained backbone weights from the transformers library is not supported yet. `use_timm_backbone` must be set to `True` when `use_pretrained_backbone=True`"
-            )
-
-        if backbone_config is not None and backbone is not None:
-            raise ValueError("You can't specify both `backbone` and `backbone_config`.")
-
-        if backbone_config is not None and use_timm_backbone:
-            raise ValueError("You can't specify both `backbone_config` and `use_timm_backbone`.")
-
-        if backbone_kwargs is not None and backbone_kwargs and backbone_config is not None:
-            raise ValueError("You can't specify both `backbone_kwargs` and `backbone_config`.")
-
-        if not use_timm_backbone:
+        # We default to values which were previously hard-coded in the model. This enables configurability of the config
+        # while keeping the default behavior the same.
+        if use_timm_backbone and backbone_kwargs is None:
+            backbone_kwargs = {}
+            if dilation:
+                backbone_kwargs["output_stride"] = 16
+            backbone_kwargs["out_indices"] = [1, 2, 3, 4]
+            backbone_kwargs["in_chans"] = num_channels
+        # Backwards compatibility
+        elif not use_timm_backbone and backbone in (None, "resnet50"):
             if backbone_config is None:
                 logger.info("`backbone_config` is `None`. Initializing the config with the default `ResNet` backbone.")
                 backbone_config = CONFIG_MAPPING["resnet"](out_features=["stage4"])
@@ -201,8 +189,17 @@ class DetrConfig(PretrainedConfig):
                 backbone_model_type = backbone_config.get("model_type")
                 config_class = CONFIG_MAPPING[backbone_model_type]
                 backbone_config = config_class.from_dict(backbone_config)
+            backbone = None
             # set timm attributes to None
-            dilation, backbone, use_pretrained_backbone = None, None, None
+            dilation = None
+
+        verify_backbone_config_arguments(
+            use_timm_backbone=use_timm_backbone,
+            use_pretrained_backbone=use_pretrained_backbone,
+            backbone=backbone,
+            backbone_config=backbone_config,
+            backbone_kwargs=backbone_kwargs,
+        )
 
         self.use_timm_backbone = use_timm_backbone
         self.backbone_config = backbone_config
@@ -242,43 +239,5 @@ class DetrConfig(PretrainedConfig):
         self.eos_coefficient = eos_coefficient
         super().__init__(is_encoder_decoder=is_encoder_decoder, **kwargs)
 
-    @property
-    def num_attention_heads(self) -> int:
-        return self.encoder_attention_heads
 
-    @property
-    def hidden_size(self) -> int:
-        return self.d_model
-
-    @classmethod
-    def from_backbone_config(cls, backbone_config: PretrainedConfig, **kwargs):
-        """Instantiate a [`DetrConfig`] (or a derived class) from a pre-trained backbone model configuration.
-
-        Args:
-            backbone_config ([`PretrainedConfig`]):
-                The backbone configuration.
-        Returns:
-            [`DetrConfig`]: An instance of a configuration object
-        """
-        return cls(backbone_config=backbone_config, **kwargs)
-
-
-class DetrOnnxConfig(OnnxConfig):
-    torch_onnx_minimum_version = version.parse("1.11")
-
-    @property
-    def inputs(self) -> Mapping[str, Mapping[int, str]]:
-        return OrderedDict(
-            [
-                ("pixel_values", {0: "batch", 1: "num_channels", 2: "height", 3: "width"}),
-                ("pixel_mask", {0: "batch"}),
-            ]
-        )
-
-    @property
-    def atol_for_validation(self) -> float:
-        return 1e-5
-
-    @property
-    def default_onnx_opset(self) -> int:
-        return 12
+__all__ = ["DetrConfig"]

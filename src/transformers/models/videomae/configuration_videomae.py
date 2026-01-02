@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" VideoMAE model configuration"""
+"""VideoMAE model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import VIDEOMAE_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class VideoMAEConfig(PretrainedConfig):
+class VideoMAEConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`VideoMAEModel`]. It is used to instantiate a
     VideoMAE model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the VideoMAE
     [MCG-NJU/videomae-base](https://huggingface.co/MCG-NJU/videomae-base) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         image_size (`int`, *optional*, defaults to 224):
@@ -146,3 +143,6 @@ class VideoMAEConfig(PretrainedConfig):
         self.decoder_num_hidden_layers = decoder_num_hidden_layers
         self.decoder_intermediate_size = decoder_intermediate_size
         self.norm_pix_loss = norm_pix_loss
+
+
+__all__ = ["VideoMAEConfig"]

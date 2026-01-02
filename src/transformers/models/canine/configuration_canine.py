@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" CANINE model configuration"""
+"""CANINE model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import CANINE_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class CanineConfig(PretrainedConfig):
+class CanineConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`CanineModel`]. It is used to instantiate an
     CANINE model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the CANINE
     [google/canine-s](https://huggingface.co/google/canine-s) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -139,3 +136,6 @@ class CanineConfig(PretrainedConfig):
         self.num_hash_functions = num_hash_functions
         self.num_hash_buckets = num_hash_buckets
         self.local_transformer_stride = local_transformer_stride
+
+
+__all__ = ["CanineConfig"]

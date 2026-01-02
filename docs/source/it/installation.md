@@ -138,21 +138,15 @@ conda install conda-forge::transformers
 
 ## Impostazione della cache
 
-I modelli pre-allenati sono scaricati e memorizzati localmente nella cache in: `~/.cache/huggingface/transformers/`. Questa è la directory di default data dalla variabile d'ambiente della shell `TRANSFORMERS_CACHE`. Su Windows, la directory di default è data da `C:\Users\username\.cache\huggingface\transformers`. Puoi cambiare le variabili d'ambiente della shell indicate in seguito, in ordine di priorità, per specificare una directory differente per la cache:
+I modelli pre-allenati sono scaricati e memorizzati localmente nella cache in: `~/.cache/huggingface/transformers/`. Questa è la directory di default data dalla variabile d'ambiente della shell `HF_HUB_CACHE`. Su Windows, la directory di default è data da `C:\Users\username\.cache\huggingface\transformers`. Puoi cambiare le variabili d'ambiente della shell indicate in seguito, in ordine di priorità, per specificare una directory differente per la cache:
 
-1. Variabile d'ambiente della shell (default): `TRANSFORMERS_CACHE`.
+1. Variabile d'ambiente della shell (default): `HF_HUB_CACHE`.
 2. Variabile d'ambiente della shell: `HF_HOME` + `transformers/`.
 3. Variabile d'ambiente della shell: `XDG_CACHE_HOME` + `/huggingface/transformers`.
 
-<Tip>
-
-🤗 Transformers utilizzerà le variabili d'ambiente della shell `PYTORCH_TRANSFORMERS_CACHE` o `PYTORCH_PRETRAINED_BERT_CACHE` se si proviene da un'iterazione precedente di questa libreria e sono state impostate queste variabili d'ambiente, a meno che non si specifichi la variabile d'ambiente della shell `TRANSFORMERS_CACHE`.
-
-</Tip>
-
 ## Modalità Offline
 
-🤗 Transformers può essere eseguita in un ambiente firewalled o offline utilizzando solo file locali. Imposta la variabile d'ambiente `TRANSFORMERS_OFFLINE=1` per abilitare questo comportamento.
+🤗 Transformers può essere eseguita in un ambiente firewalled o offline utilizzando solo file locali. Imposta la variabile d'ambiente `HF_HUB_OFFLINE=1` per abilitare questo comportamento.
 
 <Tip>
 
@@ -169,7 +163,7 @@ python examples/pytorch/translation/run_translation.py --model_name_or_path goog
 Esegui lo stesso programma in un'istanza offline con:
 
 ```bash
-HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 \
 python examples/pytorch/translation/run_translation.py --model_name_or_path google-t5/t5-small --dataset_name wmt16 --dataset_config ro-en ...
 ```
 

@@ -52,7 +52,7 @@ python run_image_classification.py \
     --per_device_eval_batch_size 8 \
     --logging_strategy steps \
     --logging_steps 10 \
-    --evaluation_strategy epoch \
+    --eval_strategy epoch \
     --save_strategy epoch \
     --load_best_model_at_end True \
     --save_total_limit 3 \
@@ -129,7 +129,7 @@ dataset = load_dataset("imagefolder", data_files={"train": ["path/to/file1", "pa
 Next, push it to the hub!
 
 ```python
-# assuming you have ran the huggingface-cli login command in a terminal
+# assuming you have ran the hf auth login command in a terminal
 dataset.push_to_hub("name_of_your_dataset")
 
 # if you want to push to a private repo, simply pass private=True:
@@ -152,10 +152,10 @@ $ git config --global user.email "you@example.com"
 $ git config --global user.name "Your Name"
 ```
 
-2. Log in with your HuggingFace account credentials using `huggingface-cli`:
+2. Log in with your HuggingFace account credentials using `hf`:
 
 ```bash
-$ huggingface-cli login
+$ hf auth login
 # ...follow the prompts
 ```
 

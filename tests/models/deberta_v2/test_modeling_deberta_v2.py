@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2018 Microsoft Authors and the HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,7 +34,7 @@ if is_torch_available():
     )
 
 
-class DebertaV2ModelTester(object):
+class DebertaV2ModelTester:
     def __init__(
         self,
         parent,
@@ -252,10 +251,6 @@ class DebertaV2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCas
         else {}
     )
 
-    fx_compatible = True
-    test_torchscript = False
-    test_pruning = False
-    test_head_masking = False
     is_encoder_decoder = False
 
     def setUp(self):
@@ -316,4 +311,4 @@ class DebertaV2ModelIntegrationTest(unittest.TestCase):
         expected_slice = torch.tensor(
             [[[0.2356, 0.1948, 0.0369], [-0.1063, 0.3586, -0.5152], [-0.6399, -0.0259, -0.2525]]]
         )
-        self.assertTrue(torch.allclose(output[:, 1:4, 1:4], expected_slice, atol=1e-4), f"{output[:, 1:4, 1:4]}")
+        torch.testing.assert_close(output[:, 1:4, 1:4], expected_slice, rtol=1e-4, atol=1e-4)

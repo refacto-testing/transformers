@@ -14,46 +14,72 @@
 """
 Integrations with other Python libraries.
 """
+
+import copy
 import functools
 import importlib.metadata
 import importlib.util
 import json
 import numbers
 import os
-import pickle
+import re
 import shutil
 import sys
 import tempfile
-from dataclasses import asdict, fields
+import warnings
+from dataclasses import fields
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import packaging.version
 
+from transformers.utils.import_utils import _is_package_available
+
+
+if os.getenv("WANDB_MODE") == "offline":
+    print("[INFO] Running in WANDB offline mode")
+
+from .. import PreTrainedModel, TrainingArguments
 from .. import __version__ as version
-from ..utils import flatten_dict, is_datasets_available, is_pandas_available, is_torch_available, logging
+from ..utils import (
+    PushToHubMixin,
+    flatten_dict,
+    is_datasets_available,
+    is_pandas_available,
+    is_torch_available,
+    logging,
+)
 
 
 logger = logging.get_logger(__name__)
 
+
 if is_torch_available():
     import torch
+    import torch.distributed as dist
 
 # comet_ml requires to be imported before any ML frameworks
-_has_comet = importlib.util.find_spec("comet_ml") is not None and os.getenv("COMET_MODE", "").upper() != "DISABLED"
-if _has_comet:
-    try:
-        import comet_ml  # noqa: F401
+_MIN_COMET_VERSION = "3.43.2"
+try:
+    _comet_version = importlib.metadata.version("comet_ml")
+    _is_comet_installed = True
 
-        if hasattr(comet_ml, "config") and comet_ml.config.get_config("comet.api_key"):
-            _has_comet = True
-        else:
-            if os.getenv("COMET_MODE", "").upper() != "DISABLED":
-                logger.warning("comet_ml is installed but `COMET_API_KEY` is not set.")
-            _has_comet = False
-    except (ImportError, ValueError):
-        _has_comet = False
+    _is_comet_recent_enough = packaging.version.parse(_comet_version) >= packaging.version.parse(_MIN_COMET_VERSION)
+
+    # Check if the Comet API Key is set
+    import comet_ml
+
+    if comet_ml.config.get_config("comet.api_key") is not None:
+        _is_comet_configured = True
+    else:
+        _is_comet_configured = False
+except (importlib.metadata.PackageNotFoundError, ImportError, ValueError, TypeError, AttributeError, KeyError):
+    _comet_version = None
+    _is_comet_installed = False
+    _is_comet_recent_enough = False
+    _is_comet_configured = False
 
 _has_neptune = (
     importlib.util.find_spec("neptune") is not None or importlib.util.find_spec("neptune-client") is not None
@@ -69,6 +95,7 @@ if TYPE_CHECKING and _has_neptune:
         except importlib.metadata.PackageNotFoundError:
             _has_neptune = False
 
+from .. import modelcard  # noqa: E402
 from ..trainer_callback import ProgressCallback, TrainerCallback  # noqa: E402
 from ..trainer_utils import PREFIX_CHECKPOINT_DIR, BestRun, IntervalStrategy  # noqa: E402
 from ..training_args import ParallelMode  # noqa: E402
@@ -77,14 +104,18 @@ from ..utils import ENV_VARS_TRUE_VALUES, is_torch_xla_available  # noqa: E402
 
 # Integration functions:
 def is_wandb_available():
-    # any value of WANDB_DISABLED disables wandb
-    if os.getenv("WANDB_DISABLED", "").upper() in ENV_VARS_TRUE_VALUES:
-        logger.warning(
-            "Using the `WANDB_DISABLED` environment variable is deprecated and will be removed in v5. Use the "
-            "--report_to flag to control the integrations used for logging result (for instance --report_to none)."
-        )
+    if importlib.util.find_spec("wandb") is not None:
+        import wandb
+
+        # wandb might still be detected by find_spec after an uninstall (leftover files or metadata), but not actually
+        # import correctly. To confirm it's fully installed and usable, we check for a key attribute like "run".
+        return hasattr(wandb, "run")
+    else:
         return False
-    return importlib.util.find_spec("wandb") is not None
+
+
+def is_trackio_available():
+    return importlib.util.find_spec("trackio") is not None
 
 
 def is_clearml_available():
@@ -92,7 +123,29 @@ def is_clearml_available():
 
 
 def is_comet_available():
-    return _has_comet
+    if _is_comet_installed is False:
+        return False
+
+    if _is_comet_recent_enough is False:
+        logger.warning(
+            "comet_ml version %s is installed, but version %s or higher is required. "
+            "Please update comet_ml to the latest version to enable Comet logging with pip install 'comet-ml>=%s'.",
+            _comet_version,
+            _MIN_COMET_VERSION,
+            _MIN_COMET_VERSION,
+        )
+        return False
+
+    if _is_comet_configured is False:
+        logger.warning(
+            "comet_ml is installed but the Comet API Key is not configured. "
+            "Please set the `COMET_API_KEY` environment variable to enable Comet logging. "
+            "Check out the documentation for other ways of configuring it: "
+            "https://www.comet.com/docs/v2/guides/experiment-management/configure-sdk/#set-the-api-key"
+        )
+        return False
+
+    return True
 
 
 def is_tensorboard_available():
@@ -111,10 +164,6 @@ def is_ray_tune_available():
     if not is_ray_available():
         return False
     return importlib.util.find_spec("ray.tune") is not None
-
-
-def is_sigopt_available():
-    return importlib.util.find_spec("sigopt") is not None
 
 
 def is_azureml_available():
@@ -157,17 +206,18 @@ def is_dvclive_available():
     return importlib.util.find_spec("dvclive") is not None
 
 
+def is_swanlab_available():
+    return importlib.util.find_spec("swanlab") is not None
+
+
 def hp_params(trial):
     if is_optuna_available():
         import optuna
 
-        if isinstance(trial, optuna.Trial):
+        if isinstance(trial, optuna.trial.BaseTrial):
             return trial.params
-    if is_ray_tune_available():
-        if isinstance(trial, dict):
-            return trial
 
-    if is_sigopt_available():
+    if is_ray_tune_available():
         if isinstance(trial, dict):
             return trial
 
@@ -180,10 +230,11 @@ def hp_params(trial):
 
 def run_hp_search_optuna(trainer, n_trials: int, direction: str, **kwargs) -> BestRun:
     import optuna
+    from accelerate.utils.memory import release_memory
 
     if trainer.args.process_index == 0:
 
-        def _objective(trial, checkpoint_dir=None):
+        def _objective(trial: optuna.Trial, checkpoint_dir=None):
             checkpoint = None
             if checkpoint_dir:
                 for subdir in os.listdir(checkpoint_dir):
@@ -193,23 +244,34 @@ def run_hp_search_optuna(trainer, n_trials: int, direction: str, **kwargs) -> Be
             if trainer.args.world_size > 1:
                 if trainer.args.parallel_mode != ParallelMode.DISTRIBUTED:
                     raise RuntimeError("only support DDP optuna HPO for ParallelMode.DISTRIBUTED currently.")
-                trainer._hp_search_setup(trial)
-                torch.distributed.broadcast_object_list(pickle.dumps(trainer.args), src=0)
-                trainer.train(resume_from_checkpoint=checkpoint)
+                trainer.hp_space(trial)
+                fixed_trial = optuna.trial.FixedTrial(trial.params, trial.number)
+                trial_main_rank_list = [fixed_trial]
+                torch.distributed.broadcast_object_list(trial_main_rank_list, src=0)
+                trainer.train(resume_from_checkpoint=checkpoint, trial=trial)
             else:
                 trainer.train(resume_from_checkpoint=checkpoint, trial=trial)
             # If there hasn't been any evaluation during the training loop.
             if getattr(trainer, "objective", None) is None:
                 metrics = trainer.evaluate()
                 trainer.objective = trainer.compute_objective(metrics)
+
+            # Free GPU memory
+            trainer.model_wrapped, trainer.model = release_memory(trainer.model_wrapped, trainer.model)
+            trainer.accelerator.clear()
+
             return trainer.objective
 
         timeout = kwargs.pop("timeout", None)
         n_jobs = kwargs.pop("n_jobs", 1)
+        gc_after_trial = kwargs.pop("gc_after_trial", False)
+        catch = kwargs.pop("catch", ())
         directions = direction if isinstance(direction, list) else None
         direction = None if directions is not None else direction
         study = optuna.create_study(direction=direction, directions=directions, **kwargs)
-        study.optimize(_objective, n_trials=n_trials, timeout=timeout, n_jobs=n_jobs)
+        study.optimize(
+            _objective, n_trials=n_trials, timeout=timeout, n_jobs=n_jobs, gc_after_trial=gc_after_trial, catch=catch
+        )
         if not study._is_multi_objective():
             best_trial = study.best_trial
             return BestRun(str(best_trial.number), best_trial.value, best_trial.params)
@@ -219,15 +281,11 @@ def run_hp_search_optuna(trainer, n_trials: int, direction: str, **kwargs) -> Be
     else:
         for i in range(n_trials):
             trainer.objective = None
-            args_main_rank = list(pickle.dumps(trainer.args))
+            trial_main_rank_list = [None]
             if trainer.args.parallel_mode != ParallelMode.DISTRIBUTED:
                 raise RuntimeError("only support DDP optuna HPO for ParallelMode.DISTRIBUTED currently.")
-            torch.distributed.broadcast_object_list(args_main_rank, src=0)
-            args = pickle.loads(bytes(args_main_rank))
-            for key, value in asdict(args).items():
-                if key != "local_rank":
-                    setattr(trainer.args, key, value)
-            trainer.train(resume_from_checkpoint=None)
+            torch.distributed.broadcast_object_list(trial_main_rank_list, src=0)
+            trainer.train(resume_from_checkpoint=None, trial=trial_main_rank_list[0])
             # If there hasn't been any evaluation during the training loop.
             if getattr(trainer, "objective", None) is None:
                 metrics = trainer.evaluate()
@@ -236,8 +294,16 @@ def run_hp_search_optuna(trainer, n_trials: int, direction: str, **kwargs) -> Be
 
 
 def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestRun:
+    """
+    Environment:
+        - **RAY_SCOPE** (`str`, *optional*, defaults to `"last"`):
+            The scope to use when doing hyperparameter search with Ray. By default, `"last"` will be used. Ray
+            will then use the last checkpoint of all trials, compare those, and select the best one. However,
+            other options are also available. See the Ray documentation (https://docs.ray.io/en/latest/tune/api_docs/analysis.html#ray.tune.ExperimentAnalysis.get_best_trial)
+            for more options
+    """
     import ray
-    import ray.train
+    import ray.tune
 
     def _objective(trial: dict, local_trainer):
         try:
@@ -250,7 +316,7 @@ def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestR
 
         local_trainer.objective = None
 
-        checkpoint = ray.train.get_checkpoint()
+        checkpoint = ray.tune.get_checkpoint()
         if checkpoint:
             # Upon trial resume, the local_trainer's objective gets reset to None.
             # If `local_trainer.train` is a noop (training has already reached
@@ -274,8 +340,8 @@ def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestR
 
             with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
                 local_trainer._tune_save_checkpoint(checkpoint_dir=temp_checkpoint_dir)
-                checkpoint = ray.train.Checkpoint.from_directory(temp_checkpoint_dir)
-                ray.train.report(metrics, checkpoint=checkpoint)
+                checkpoint = ray.tune.Checkpoint.from_directory(temp_checkpoint_dir)
+                ray.tune.report(metrics, checkpoint=checkpoint)
 
     if not trainer._memory_tracker.skip_memory_metrics:
         from ..trainer_utils import TrainerMemoryTracker
@@ -320,13 +386,13 @@ def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestR
         # Check for `do_eval` and `eval_during_training` for schedulers that require intermediate reporting.
         if isinstance(
             kwargs["scheduler"], (ASHAScheduler, MedianStoppingRule, HyperBandForBOHB, PopulationBasedTraining)
-        ) and (not trainer.args.do_eval or trainer.args.evaluation_strategy == IntervalStrategy.NO):
+        ) and (not trainer.args.do_eval or trainer.args.eval_strategy == IntervalStrategy.NO):
             raise RuntimeError(
                 "You are using {cls} as a scheduler but you haven't enabled evaluation during training. "
                 "This means your trials will not report intermediate results to Ray Tune, and "
                 "can thus not be stopped early or used to exploit other trials parameters. "
                 "If this is what you want, do not use {cls}. If you would like to use {cls}, "
-                "make sure you pass `do_eval=True` and `evaluation_strategy='steps'` in the "
+                "make sure you pass `do_eval=True` and `eval_strategy='steps'` in the "
                 "Trainer `args`.".format(cls=type(kwargs["scheduler"]).__name__)
             )
 
@@ -341,7 +407,9 @@ def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestR
 
         Assumes that `_objective`, defined above, is a function.
         """
-        if is_datasets_available():
+        if is_datasets_available() and packaging.version.parse(
+            importlib.metadata.version("datasets")
+        ) < packaging.version.parse("4.0.0"):
             import datasets.load
 
             dynamic_modules_path = os.path.join(datasets.load.init_dynamic_modules(), "__init__.py")
@@ -362,114 +430,15 @@ def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestR
         num_samples=n_trials,
         **kwargs,
     )
-    best_trial = analysis.get_best_trial(metric="objective", mode=direction[:3], scope=trainer.args.ray_scope)
+    ray_scope = os.getenv("RAY_SCOPE", "last")
+    best_trial = analysis.get_best_trial(metric="objective", mode=direction[:3], scope=ray_scope)
     best_run = BestRun(best_trial.trial_id, best_trial.last_result["objective"], best_trial.config, analysis)
     if _tb_writer is not None:
         trainer.add_callback(_tb_writer)
     return best_run
 
 
-def run_hp_search_sigopt(trainer, n_trials: int, direction: str, **kwargs) -> BestRun:
-    import sigopt
-
-    if trainer.args.process_index == 0:
-        if importlib.metadata.version("sigopt") >= "8.0.0":
-            sigopt.set_project("huggingface")
-
-            experiment = sigopt.create_experiment(
-                name="huggingface-tune",
-                type="offline",
-                parameters=trainer.hp_space(None),
-                metrics=[{"name": "objective", "objective": direction, "strategy": "optimize"}],
-                parallel_bandwidth=1,
-                budget=n_trials,
-            )
-
-            logger.info(f"created experiment: https://app.sigopt.com/experiment/{experiment.id}")
-
-            for run in experiment.loop():
-                with run:
-                    trainer.objective = None
-                    if trainer.args.world_size > 1:
-                        if trainer.args.parallel_mode != ParallelMode.DISTRIBUTED:
-                            raise RuntimeError("only support DDP Sigopt HPO for ParallelMode.DISTRIBUTED currently.")
-                        trainer._hp_search_setup(run.run)
-                        torch.distributed.broadcast_object_list(pickle.dumps(trainer.args), src=0)
-                        trainer.train(resume_from_checkpoint=None)
-                    else:
-                        trainer.train(resume_from_checkpoint=None, trial=run.run)
-                    # If there hasn't been any evaluation during the training loop.
-                    if getattr(trainer, "objective", None) is None:
-                        metrics = trainer.evaluate()
-                        trainer.objective = trainer.compute_objective(metrics)
-                    run.log_metric("objective", trainer.objective)
-
-            best = list(experiment.get_best_runs())[0]
-            best_run = BestRun(best.id, best.values["objective"].value, best.assignments)
-        else:
-            from sigopt import Connection
-
-            conn = Connection()
-            proxies = kwargs.pop("proxies", None)
-            if proxies is not None:
-                conn.set_proxies(proxies)
-
-            experiment = conn.experiments().create(
-                name="huggingface-tune",
-                parameters=trainer.hp_space(None),
-                metrics=[{"name": "objective", "objective": direction, "strategy": "optimize"}],
-                parallel_bandwidth=1,
-                observation_budget=n_trials,
-                project="huggingface",
-            )
-            logger.info(f"created experiment: https://app.sigopt.com/experiment/{experiment.id}")
-
-            while experiment.progress.observation_count < experiment.observation_budget:
-                suggestion = conn.experiments(experiment.id).suggestions().create()
-                trainer.objective = None
-                if trainer.args.world_size > 1:
-                    if trainer.args.parallel_mode != ParallelMode.DISTRIBUTED:
-                        raise RuntimeError("only support DDP Sigopt HPO for ParallelMode.DISTRIBUTED currently.")
-                    trainer._hp_search_setup(suggestion)
-                    torch.distributed.broadcast_object_list(pickle.dumps(trainer.args), src=0)
-                    trainer.train(resume_from_checkpoint=None)
-                else:
-                    trainer.train(resume_from_checkpoint=None, trial=suggestion)
-                # If there hasn't been any evaluation during the training loop.
-                if getattr(trainer, "objective", None) is None:
-                    metrics = trainer.evaluate()
-                    trainer.objective = trainer.compute_objective(metrics)
-
-                values = [{"name": "objective", "value": trainer.objective}]
-                obs = conn.experiments(experiment.id).observations().create(suggestion=suggestion.id, values=values)
-                logger.info(f"[suggestion_id, observation_id]: [{suggestion.id}, {obs.id}]")
-                experiment = conn.experiments(experiment.id).fetch()
-
-            best = list(conn.experiments(experiment.id).best_assignments().fetch().iterate_pages())[0]
-            best_run = BestRun(best.id, best.value, best.assignments)
-        return best_run
-    else:
-        for i in range(n_trials):
-            trainer.objective = None
-            args_main_rank = list(pickle.dumps(trainer.args))
-            if trainer.args.parallel_mode != ParallelMode.DISTRIBUTED:
-                raise RuntimeError("only support DDP Sigopt HPO for ParallelMode.DISTRIBUTED currently.")
-            torch.distributed.broadcast_object_list(args_main_rank, src=0)
-            args = pickle.loads(bytes(args_main_rank))
-            for key, value in asdict(args).items():
-                if key != "local_rank":
-                    setattr(trainer.args, key, value)
-            trainer.train(resume_from_checkpoint=None)
-            # If there hasn't been any evaluation during the training loop.
-            if getattr(trainer, "objective", None) is None:
-                metrics = trainer.evaluate()
-                trainer.objective = trainer.compute_objective(metrics)
-        return None
-
-
 def run_hp_search_wandb(trainer, n_trials: int, direction: str, **kwargs) -> BestRun:
-    from ..integrations import is_wandb_available
-
     if not is_wandb_available():
         raise ImportError("This function needs wandb installed: `pip install wandb`")
     import wandb
@@ -529,11 +498,19 @@ def run_hp_search_wandb(trainer, n_trials: int, direction: str, **kwargs) -> Bes
 
         return trainer.objective
 
-    sweep_id = wandb.sweep(sweep_config, project=project, entity=entity) if not sweep_id else sweep_id
+    if not sweep_id:
+        sweep_id = wandb.sweep(sweep_config, project=project, entity=entity)
+    else:
+        import wandb.env
+
+        if entity:
+            wandb.env.set_entity(entity)
+        wandb.env.set_project(project)
+
     logger.info(f"wandb sweep id - {sweep_id}")
     wandb.agent(sweep_id, function=_objective, count=n_trials)
 
-    return BestRun(best_trial["run_id"], best_trial["objective"], best_trial["hyperparameters"])
+    return BestRun(best_trial["run_id"], best_trial["objective"], best_trial["hyperparameters"], sweep_id)
 
 
 def get_available_reporting_integrations():
@@ -558,6 +535,10 @@ def get_available_reporting_integrations():
         integrations.append("codecarbon")
     if is_clearml_available():
         integrations.append("clearml")
+    if is_swanlab_available():
+        integrations.append("swanlab")
+    if is_trackio_available():
+        integrations.append("trackio")
     return integrations
 
 
@@ -577,6 +558,17 @@ def rewrite_logs(d):
     return new_d
 
 
+def default_logdir() -> str:
+    """
+    Same default as PyTorch
+    """
+    import socket
+    from datetime import datetime
+
+    current_time = datetime.now().strftime("%b%d_%H-%M-%S")
+    return os.path.join("runs", current_time + "_" + socket.gethostname())
+
+
 class TensorBoardCallback(TrainerCallback):
     """
     A [`TrainerCallback`] that sends the logs to [TensorBoard](https://www.tensorflow.org/tensorboard).
@@ -584,49 +576,47 @@ class TensorBoardCallback(TrainerCallback):
     Args:
         tb_writer (`SummaryWriter`, *optional*):
             The writer to use. Will instantiate one if not set.
+    Environment:
+        - **TENSORBOARD_LOGGING_DIR** (`str`, *optional*, defaults to `None`):
+            The logging dir to log the results. Default value is os.path.join(args.output_dir, default_logdir())
     """
 
     def __init__(self, tb_writer=None):
-        has_tensorboard = is_tensorboard_available()
-        if not has_tensorboard:
+        if not is_tensorboard_available():
             raise RuntimeError(
                 "TensorBoardCallback requires tensorboard to be installed. Either update your PyTorch version or"
                 " install tensorboardX."
             )
-        if has_tensorboard:
-            try:
-                from torch.utils.tensorboard import SummaryWriter  # noqa: F401
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except ImportError:
+            from tensorboardX import SummaryWriter
 
-                self._SummaryWriter = SummaryWriter
-            except ImportError:
-                try:
-                    from tensorboardX import SummaryWriter
-
-                    self._SummaryWriter = SummaryWriter
-                except ImportError:
-                    self._SummaryWriter = None
-        else:
-            self._SummaryWriter = None
+        self._SummaryWriter = SummaryWriter
         self.tb_writer = tb_writer
+        self.logging_dir = os.getenv("TENSORBOARD_LOGGING_DIR", None)
+        if self.logging_dir is not None:
+            self.logging_dir = os.path.expanduser(self.logging_dir)
 
-    def _init_summary_writer(self, args, log_dir=None):
-        log_dir = log_dir or args.logging_dir
+    def _init_summary_writer(self, args):
         if self._SummaryWriter is not None:
-            self.tb_writer = self._SummaryWriter(log_dir=log_dir)
+            self.tb_writer = self._SummaryWriter(log_dir=self.logging_dir)
 
     def on_train_begin(self, args, state, control, **kwargs):
         if not state.is_world_process_zero:
             return
 
-        log_dir = None
-
         if state.is_hyper_param_search:
             trial_name = state.trial_name
             if trial_name is not None:
-                log_dir = os.path.join(args.logging_dir, trial_name)
+                # overwrite logging dir for trials
+                self.logging_dir = os.path.join(args.output_dir, default_logdir(), trial_name)
+
+        if self.logging_dir is None:
+            self.logging_dir = os.path.join(args.output_dir, default_logdir())
 
         if self.tb_writer is None:
-            self._init_summary_writer(args, log_dir)
+            self._init_summary_writer(args)
 
         if self.tb_writer is not None:
             self.tb_writer.add_text("args", args.to_json_string())
@@ -648,6 +638,8 @@ class TensorBoardCallback(TrainerCallback):
             for k, v in logs.items():
                 if isinstance(v, (int, float)):
                     self.tb_writer.add_scalar(k, v, state.global_step)
+                elif isinstance(v, str):
+                    self.tb_writer.add_text(k, v, state.global_step)
                 else:
                     logger.warning(
                         "Trainer is attempting to log a value of "
@@ -663,6 +655,38 @@ class TensorBoardCallback(TrainerCallback):
             self.tb_writer = None
 
 
+def save_model_architecture_to_file(model: Any, output_dir: str):
+    with open(f"{output_dir}/model_architecture.txt", "w+") as f:
+        if isinstance(model, PreTrainedModel):
+            print(model, file=f)
+        elif is_torch_available() and (
+            isinstance(model, (torch.nn.Module, PushToHubMixin)) and hasattr(model, "base_model")
+        ):
+            print(model, file=f)
+
+
+class WandbLogModel(str, Enum):
+    """Enum of possible log model values in W&B."""
+
+    CHECKPOINT = "checkpoint"
+    END = "end"
+    FALSE = "false"
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check if the value corresponds to a state where the `WANDB_LOG_MODEL` setting is enabled."""
+        return self in (WandbLogModel.CHECKPOINT, WandbLogModel.END)
+
+    @classmethod
+    def _missing_(cls, value: Any) -> "WandbLogModel":
+        if not isinstance(value, str):
+            raise TypeError(f"Expecting to have a string `WANDB_LOG_MODEL` setting, but got {type(value)}")
+        logger.warning(
+            f"Received unrecognized `WANDB_LOG_MODEL` setting value={value}; so disabling `WANDB_LOG_MODEL`"
+        )
+        return WandbLogModel.FALSE
+
+
 class WandbCallback(TrainerCallback):
     """
     A [`TrainerCallback`] that logs metrics, media, model checkpoints to [Weight and Biases](https://www.wandb.com/).
@@ -672,21 +696,12 @@ class WandbCallback(TrainerCallback):
         has_wandb = is_wandb_available()
         if not has_wandb:
             raise RuntimeError("WandbCallback requires wandb to be installed. Run `pip install wandb`.")
-        if has_wandb:
-            import wandb
 
-            self._wandb = wandb
+        import wandb
+
+        self._wandb = wandb
         self._initialized = False
-        # log model
-        if os.getenv("WANDB_LOG_MODEL", "FALSE").upper() in ENV_VARS_TRUE_VALUES.union({"TRUE"}):
-            DeprecationWarning(
-                f"Setting `WANDB_LOG_MODEL` as {os.getenv('WANDB_LOG_MODEL')} is deprecated and will be removed in "
-                "version 5 of transformers. Use one of `'end'` or `'checkpoint'` instead."
-            )
-            logger.info(f"Setting `WANDB_LOG_MODEL` from {os.getenv('WANDB_LOG_MODEL')} to `end` instead")
-            self._log_model = "end"
-        else:
-            self._log_model = os.getenv("WANDB_LOG_MODEL", "false").lower()
+        self._log_model = WandbLogModel(os.getenv("WANDB_LOG_MODEL", "false"))
 
     def setup(self, args, state, model, **kwargs):
         """
@@ -702,40 +717,41 @@ class WandbCallback(TrainerCallback):
             to `"end"`, the model will be uploaded at the end of training. If set to `"checkpoint"`, the checkpoint
             will be uploaded every `args.save_steps` . If set to `"false"`, the model will not be uploaded. Use along
             with [`~transformers.TrainingArguments.load_best_model_at_end`] to upload best model.
-
-            <Deprecated version="5.0">
-
-            Setting `WANDB_LOG_MODEL` as `bool` will be deprecated in version 5 of 🤗 Transformers.
-
-            </Deprecated>
         - **WANDB_WATCH** (`str`, *optional* defaults to `"false"`):
             Can be `"gradients"`, `"all"`, `"parameters"`, or `"false"`. Set to `"all"` to log gradients and
             parameters.
         - **WANDB_PROJECT** (`str`, *optional*, defaults to `"huggingface"`):
             Set this to a custom string to store results in a different project.
-        - **WANDB_DISABLED** (`bool`, *optional*, defaults to `False`):
-            Whether to disable wandb entirely. Set `WANDB_DISABLED=true` to disable.
         """
         if self._wandb is None:
             return
         self._initialized = True
+
+        # prepare to handle potential configuration issues during setup
+        from wandb.sdk.lib.config_util import ConfigError as WandbConfigError
+
         if state.is_world_process_zero:
-            logger.info(
-                'Automatic Weights & Biases logging enabled, to disable set os.environ["WANDB_DISABLED"] = "true"'
-            )
             combined_dict = {**args.to_dict()}
 
             if hasattr(model, "config") and model.config is not None:
-                model_config = model.config.to_dict()
+                model_config = model.config if isinstance(model.config, dict) else model.config.to_dict()
                 combined_dict = {**model_config, **combined_dict}
+            if hasattr(model, "peft_config") and model.peft_config is not None:
+                peft_config = model.peft_config
+                combined_dict = {"peft_config": peft_config, **combined_dict}
             trial_name = state.trial_name
             init_args = {}
             if trial_name is not None:
                 init_args["name"] = trial_name
-                init_args["group"] = args.run_name
-            else:
-                if not (args.run_name is None or args.run_name == args.output_dir):
-                    init_args["name"] = args.run_name
+                init_args["group"] = args.run_name or args.output_dir
+            elif args.run_name is not None:
+                init_args["name"] = args.run_name
+                if args.run_name == args.output_dir:
+                    self._wandb.termwarn(
+                        "The `run_name` is currently set to the same value as `TrainingArguments.output_dir`. If this was "
+                        "not intended, please specify a different run name by setting the `TrainingArguments.run_name` parameter.",
+                        repeat=False,
+                    )
 
             if self._wandb.run is None:
                 self._wandb.init(
@@ -743,7 +759,7 @@ class WandbCallback(TrainerCallback):
                     **init_args,
                 )
             # add config parameters (run may have been created manually)
-            self._wandb.config.update(combined_dict, allow_val_change=True)
+            self._wandb.config.update(combined_dict or {}, allow_val_change=True)
 
             # define default x-axis (for latest wandb versions)
             if getattr(self._wandb, "define_metric", None):
@@ -756,6 +772,52 @@ class WandbCallback(TrainerCallback):
                 self._wandb.watch(model, log=_watch_model, log_freq=max(100, state.logging_steps))
             self._wandb.run._label(code="transformers_trainer")
 
+            # add number of model parameters to wandb config
+            try:
+                self._wandb.config["model/num_parameters"] = model.num_parameters()
+            except AttributeError:
+                logger.info(
+                    "Could not log the number of model parameters in Weights & Biases due to an AttributeError."
+                )
+            except WandbConfigError:
+                logger.warning(
+                    "A ConfigError was raised whilst setting the number of model parameters in Weights & Biases config."
+                )
+
+            # log the initial model architecture to an artifact
+            if self._log_model.is_enabled:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    model_name = (
+                        f"model-{self._wandb.run.id}"
+                        if (args.run_name is None or args.run_name == args.output_dir)
+                        else f"model-{self._wandb.run.name}"
+                    )
+                    model_artifact = self._wandb.Artifact(
+                        name=model_name,
+                        type="model",
+                        metadata={
+                            "model_config": model.config.to_dict() if hasattr(model, "config") else None,
+                            "num_parameters": self._wandb.config.get("model/num_parameters"),
+                            "initial_model": True,
+                        },
+                    )
+                    # add the architecture to a separate text file
+                    save_model_architecture_to_file(model, temp_dir)
+
+                    for f in Path(temp_dir).glob("*"):
+                        if f.is_file():
+                            with model_artifact.new_file(f.name, mode="wb") as fa:
+                                fa.write(f.read_bytes())
+                    self._wandb.run.log_artifact(model_artifact, aliases=["base_model"])
+
+                    badge_markdown = (
+                        f'[<img src="https://raw.githubusercontent.com/wandb/assets/main/wandb-github-badge'
+                        f'-28.svg" alt="Visualize in Weights & Biases" width="20'
+                        f'0" height="32"/>]({self._wandb.run.url})'
+                    )
+
+                    modelcard.AUTOGENERATED_TRAINER_COMMENT += f"\n{badge_markdown}"
+
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         if self._wandb is None:
             return
@@ -767,13 +829,18 @@ class WandbCallback(TrainerCallback):
         if not self._initialized:
             self.setup(args, state, model, **kwargs)
 
-    def on_train_end(self, args, state, control, model=None, tokenizer=None, **kwargs):
+    def on_train_end(self, args: TrainingArguments, state, control, model=None, processing_class=None, **kwargs):
         if self._wandb is None:
             return
-        if self._log_model in ("end", "checkpoint") and self._initialized and state.is_world_process_zero:
+        if self._log_model.is_enabled and self._initialized and state.is_world_process_zero:
             from ..trainer import Trainer
 
-            fake_trainer = Trainer(args=args, model=model, tokenizer=tokenizer)
+            args_for_fake = copy.deepcopy(args)
+            args_for_fake.deepspeed = None
+            args_for_fake.deepspeed_plugin = None
+            fake_trainer = Trainer(
+                args=args_for_fake, model=model, processing_class=processing_class, eval_dataset=["fake"]
+            )
             with tempfile.TemporaryDirectory() as temp_dir:
                 fake_trainer.save_model(temp_dir)
                 metadata = (
@@ -786,20 +853,25 @@ class WandbCallback(TrainerCallback):
                     else {
                         f"eval/{args.metric_for_best_model}": state.best_metric,
                         "train/total_floss": state.total_flos,
+                        "model/num_parameters": self._wandb.config.get("model/num_parameters"),
                     }
                 )
+                metadata["final_model"] = True
                 logger.info("Logging model artifacts. ...")
                 model_name = (
                     f"model-{self._wandb.run.id}"
                     if (args.run_name is None or args.run_name == args.output_dir)
                     else f"model-{self._wandb.run.name}"
                 )
+                # add the model architecture to a separate text file
+                save_model_architecture_to_file(model, temp_dir)
+
                 artifact = self._wandb.Artifact(name=model_name, type="model", metadata=metadata)
                 for f in Path(temp_dir).glob("*"):
                     if f.is_file():
                         with artifact.new_file(f.name, mode="wb") as fa:
                             fa.write(f.read_bytes())
-                self._wandb.run.log_artifact(artifact)
+                self._wandb.run.log_artifact(artifact, aliases=["final_model"])
 
     def on_log(self, args, state, control, model=None, logs=None, **kwargs):
         single_value_scalars = [
@@ -823,78 +895,296 @@ class WandbCallback(TrainerCallback):
             self._wandb.log({**non_scalar_logs, "train/global_step": state.global_step})
 
     def on_save(self, args, state, control, **kwargs):
-        if self._log_model == "checkpoint" and self._initialized and state.is_world_process_zero:
+        if self._log_model == WandbLogModel.CHECKPOINT and self._initialized and state.is_world_process_zero:
             checkpoint_metadata = {
                 k: v
                 for k, v in dict(self._wandb.summary).items()
                 if isinstance(v, numbers.Number) and not k.startswith("_")
             }
+            checkpoint_metadata["model/num_parameters"] = self._wandb.config.get("model/num_parameters")
 
             ckpt_dir = f"checkpoint-{state.global_step}"
             artifact_path = os.path.join(args.output_dir, ckpt_dir)
             logger.info(f"Logging checkpoint artifacts in {ckpt_dir}. ...")
             checkpoint_name = (
-                f"checkpoint-{self._wandb.run.id}"
+                f"model-{self._wandb.run.id}"
                 if (args.run_name is None or args.run_name == args.output_dir)
-                else f"checkpoint-{self._wandb.run.name}"
+                else f"model-{self._wandb.run.name}"
             )
             artifact = self._wandb.Artifact(name=checkpoint_name, type="model", metadata=checkpoint_metadata)
             artifact.add_dir(artifact_path)
-            self._wandb.log_artifact(artifact, aliases=[f"checkpoint-{state.global_step}"])
+            self._wandb.log_artifact(
+                artifact, aliases=[f"epoch_{round(state.epoch, 2)}", f"checkpoint_global_step_{state.global_step}"]
+            )
+
+    def on_predict(self, args, state, control, metrics, **kwargs):
+        if self._wandb is None:
+            return
+        if not self._initialized:
+            self.setup(args, state, **kwargs)
+        if state.is_world_process_zero:
+            metrics = rewrite_logs(metrics)
+            self._wandb.log(metrics)
+
+
+class TrackioCallback(TrainerCallback):
+    """
+    A [`TrainerCallback`] that logs metrics to Trackio.
+
+    It records training metrics, model (and PEFT) configuration, and GPU memory usage.
+    If `nvidia-ml-py` is installed, GPU power consumption is also tracked.
+
+    **Requires**:
+    ```bash
+    pip install trackio
+    ```
+    """
+
+    SPACE_URL = "https://huggingface.co/spaces/{space_id}"
+
+    def __init__(self):
+        has_trackio = is_trackio_available()
+        if not has_trackio:
+            raise RuntimeError("TrackioCallback requires trackio to be installed. Run `pip install trackio`.")
+        if has_trackio:
+            import trackio
+
+            self._trackio = trackio
+        self._initialized = False
+
+    def setup(self, args, state, model, **kwargs):
+        """
+        Setup the optional Trackio integration.
+
+        To customize the setup you can also set the arguments `project`, `trackio_space_id` and `hub_private_repo` in
+        [`TrainingArguments`]. Please refer to the docstring of for more details.
+        """
+        if state.is_world_process_zero:
+            if os.getenv("TRACKIO_PROJECT"):
+                logger.warning(
+                    "The `TRACKIO_PROJECT` environment variable is deprecated and will be removed in a future "
+                    "version. Use TrainingArguments.project instead."
+                )
+                project = os.getenv("TRACKIO_PROJECT")
+            else:
+                project = args.project
+
+            if os.getenv("TRACKIO_SPACE_ID"):
+                logger.warning(
+                    "The `TRACKIO_SPACE_ID` environment variable is deprecated and will be removed in a future "
+                    "version. Use TrainingArguments.trackio_space_id instead."
+                )
+                space_id = os.getenv("TRACKIO_SPACE_ID")
+            else:
+                space_id = args.trackio_space_id
+
+            combined_dict = {**args.to_dict()}
+
+            if hasattr(model, "config") and model.config is not None:
+                model_config = model.config if isinstance(model.config, dict) else model.config.to_dict()
+                combined_dict = {**model_config, **combined_dict}
+            if hasattr(model, "peft_config") and model.peft_config is not None:
+                peft_config = model.peft_config
+                combined_dict = {"peft_config": peft_config, **combined_dict}
+
+            self._trackio.init(
+                project=project,
+                name=args.run_name,
+                space_id=space_id,
+                resume="allow",
+                private=args.hub_private_repo,
+            )
+
+            # Add config parameters (run may have been created manually)
+            self._trackio.config.update(combined_dict, allow_val_change=True)
+
+            # Add number of model parameters to trackio config
+            try:
+                self._trackio.config["model/num_parameters"] = model.num_parameters()
+            except AttributeError:
+                logger.info("Could not log the number of model parameters in Trackio due to an AttributeError.")
+        self._initialized = True
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model, **kwargs)
+
+    def on_train_end(self, args: TrainingArguments, state, control, model=None, processing_class=None, **kwargs):
+        if state.is_world_process_zero and self._initialized:
+            self._trackio.finish()
+
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        single_value_scalars = [
+            "train_runtime",
+            "train_samples_per_second",
+            "train_steps_per_second",
+            "train_loss",
+            "total_flos",
+        ]
+
+        if is_torch_available() and torch.cuda.is_available():
+            device_idx = torch.cuda.current_device()
+            total_memory = torch.cuda.get_device_properties(device_idx).total_memory
+            memory_allocated = torch.cuda.memory_allocated(device_idx)
+
+            gpu_memory_logs = {
+                f"gpu/{device_idx}/allocated_memory": memory_allocated / (1024**3),  # GB
+                f"gpu/{device_idx}/memory_usage": memory_allocated / total_memory,  # ratio
+            }
+            if _is_package_available("pynvml"):
+                power = torch.cuda.power_draw(device_idx)
+                gpu_memory_logs[f"gpu/{device_idx}/power"] = power / 1000  # Watts
+            if dist.is_available() and dist.is_initialized():
+                gathered_logs = [None] * dist.get_world_size()
+                dist.all_gather_object(gathered_logs, gpu_memory_logs)
+                gpu_memory_logs = {k: v for d in gathered_logs for k, v in d.items()}
+        else:
+            gpu_memory_logs = {}
+
+        if not self._initialized:
+            self.setup(args, state, model)
+        if state.is_world_process_zero:
+            non_scalar_logs = {k: v for k, v in logs.items() if k not in single_value_scalars}
+            non_scalar_logs = rewrite_logs(non_scalar_logs)
+            self._trackio.log({**non_scalar_logs, **gpu_memory_logs, "train/global_step": state.global_step})
+
+    def on_save(self, args, state, control, **kwargs):
+        return
+
+    def on_predict(self, args, state, control, metrics, **kwargs):
+        if self._trackio is None:
+            return
+        if not self._initialized:
+            self.setup(args, state, **kwargs)
+        if state.is_world_process_zero:
+            metrics = rewrite_logs(metrics)
+            self._trackio.log(metrics)
+
+    def on_push_begin(self, args, state, control, model, **kwargs):
+        if not state.is_world_process_zero or self._trackio is None:
+            return
+        if (current_project := self._trackio.context_vars.current_project.get()) is None:
+            return
+        trackio_version = packaging.version.parse(self._trackio.__version__)
+        if trackio_version < packaging.version.parse("0.13.0"):
+            warnings.warn(
+                "The version of `trackio` that is installed is <=0.13.0, so "
+                "the local Trackio project will not be pushed to Hugging Face. Run "
+                "`pip install --upgrade trackio` to fix this."
+            )
+            return
+
+        space_id = self._trackio.context_vars.current_space_id.get()
+        if space_id is None:
+            space_id = self._trackio.sync(current_project, force=True)
+        space_url = self.SPACE_URL.format(space_id=space_id)
+
+        badge_markdown = (
+            f'<a href="{space_url}" target="_blank"><img src="https://raw.githubusercontent.com/gradio-app/trackio/refs/heads/main/trackio/assets/badge.png" alt="Visualize in Trackio"'
+            ' title="Visualize in Trackio" style="height: 40px;"/></a>'
+        )
+        if badge_markdown not in modelcard.AUTOGENERATED_TRAINER_COMMENT:
+            modelcard.AUTOGENERATED_TRAINER_COMMENT += f"\n{badge_markdown}"
+
+        trackio_tags = ["trackio", f"trackio:{space_url}"]
+        if getattr(model, "model_tags", None) is not None:
+            if "trackio" not in model.model_tags:
+                model.model_tags.extend(trackio_tags)
+        else:
+            model.model_tags = trackio_tags
 
 
 class CometCallback(TrainerCallback):
     """
-    A [`TrainerCallback`] that sends the logs to [Comet ML](https://www.comet.ml/site/).
+    A [`TrainerCallback`] that sends the logs to [Comet ML](https://www.comet.com/site/).
     """
 
     def __init__(self):
-        if not _has_comet:
-            raise RuntimeError("CometCallback requires comet-ml to be installed. Run `pip install comet-ml`.")
+        if _is_comet_installed is False or _is_comet_recent_enough is False:
+            raise RuntimeError(
+                f"CometCallback requires comet-ml>={_MIN_COMET_VERSION} to be installed. Run `pip install comet-ml>={_MIN_COMET_VERSION}`."
+            )
         self._initialized = False
         self._log_assets = False
+        self._experiment = None
 
     def setup(self, args, state, model):
         """
-        Setup the optional Comet.ml integration.
+        Setup the optional Comet integration.
 
         Environment:
-        - **COMET_MODE** (`str`, *optional*, defaults to `ONLINE`):
-            Whether to create an online, offline experiment or disable Comet logging. Can be `OFFLINE`, `ONLINE`, or
-            `DISABLED`.
+        - **COMET_MODE** (`str`, *optional*, default to `get_or_create`):
+            Control whether to create and log to a new Comet experiment or append to an existing experiment.
+            It accepts the following values:
+                * `get_or_create`: Decides automatically depending if
+                  `COMET_EXPERIMENT_KEY` is set and whether an Experiment
+                  with that key already exists or not.
+                * `create`: Always create a new Comet Experiment.
+                * `get`: Always try to append to an Existing Comet Experiment.
+                  Requires `COMET_EXPERIMENT_KEY` to be set.
+        - **COMET_START_ONLINE** (`bool`, *optional*):
+            Whether to create an online or offline Experiment.
         - **COMET_PROJECT_NAME** (`str`, *optional*):
             Comet project name for experiments.
-        - **COMET_OFFLINE_DIRECTORY** (`str`, *optional*):
-            Folder to use for saving offline experiments when `COMET_MODE` is `OFFLINE`.
         - **COMET_LOG_ASSETS** (`str`, *optional*, defaults to `TRUE`):
-            Whether or not to log training assets (tf event logs, checkpoints, etc), to Comet. Can be `TRUE`, or
+            Whether or not to log training assets (checkpoints, etc), to Comet. Can be `TRUE`, or
             `FALSE`.
 
         For a number of configurable items in the environment, see
-        [here](https://www.comet.ml/docs/python-sdk/advanced/#comet-configuration-variables).
+        [here](https://www.comet.com/docs/v2/guides/experiment-management/configure-sdk/#explore-comet-configuration-options).
         """
         self._initialized = True
         log_assets = os.getenv("COMET_LOG_ASSETS", "FALSE").upper()
         if log_assets in {"TRUE", "1"}:
             self._log_assets = True
         if state.is_world_process_zero:
-            comet_mode = os.getenv("COMET_MODE", "ONLINE").upper()
-            experiment = None
-            experiment_kwargs = {"project_name": os.getenv("COMET_PROJECT_NAME", "huggingface")}
-            if comet_mode == "ONLINE":
-                experiment = comet_ml.Experiment(**experiment_kwargs)
-                experiment.log_other("Created from", "transformers")
-                logger.info("Automatic Comet.ml online logging enabled")
-            elif comet_mode == "OFFLINE":
-                experiment_kwargs["offline_directory"] = os.getenv("COMET_OFFLINE_DIRECTORY", "./")
-                experiment = comet_ml.OfflineExperiment(**experiment_kwargs)
-                experiment.log_other("Created from", "transformers")
-                logger.info("Automatic Comet.ml offline logging enabled; use `comet upload` when finished")
-            if experiment is not None:
-                experiment._set_model_graph(model, framework="transformers")
-                experiment._log_parameters(args, prefix="args/", framework="transformers")
-                if hasattr(model, "config"):
-                    experiment._log_parameters(model.config, prefix="config/", framework="transformers")
+            comet_old_mode = os.getenv("COMET_MODE")
+
+            mode = None
+            online = None
+
+            if comet_old_mode is not None:
+                comet_old_mode = comet_old_mode.lower()
+                if comet_old_mode in ("get", "get_or_create", "create"):
+                    mode = comet_old_mode
+                elif comet_old_mode:
+                    logger.warning("Invalid COMET_MODE env value %r, Comet logging is disabled", comet_old_mode)
+                    return
+
+            # For HPO, we always create a new experiment for each trial
+            if state.is_hyper_param_search:
+                if mode is not None:
+                    logger.warning(
+                        "Hyperparameter Search is enabled, forcing the creation of new experiments, COMET_MODE value %r  is ignored",
+                        comet_old_mode,
+                    )
+                mode = "create"
+
+            import comet_ml
+
+            experiment_config = comet_ml.ExperimentConfig(name=args.run_name)
+
+            self._experiment = comet_ml.start(online=online, mode=mode, experiment_config=experiment_config)
+            self._experiment.__internal_api__set_model_graph__(model, framework="transformers")
+
+            params = {"args": args.to_dict()}
+
+            if hasattr(model, "config") and model.config is not None:
+                model_config = model.config.to_dict()
+                params["config"] = model_config
+            if hasattr(model, "peft_config") and model.peft_config is not None:
+                peft_config = model.peft_config
+                params["peft_config"] = peft_config
+
+            self._experiment.__internal_api__log_parameters__(
+                params, framework="transformers", source="manual", flatten_nested=True
+            )
+
+            if state.is_hyper_param_search:
+                optimization_id = getattr(state, "trial_name", None)
+                optimization_params = getattr(state, "trial_params", None)
+
+                self._experiment.log_optimization(optimization_id=optimization_id, parameters=optimization_params)
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         if not self._initialized:
@@ -904,20 +1194,34 @@ class CometCallback(TrainerCallback):
         if not self._initialized:
             self.setup(args, state, model)
         if state.is_world_process_zero:
-            experiment = comet_ml.config.get_global_experiment()
-            if experiment is not None:
-                experiment._log_metrics(logs, step=state.global_step, epoch=state.epoch, framework="transformers")
+            if self._experiment is not None:
+                rewritten_logs = rewrite_logs(logs)
+                self._experiment.__internal_api__log_metrics__(
+                    rewritten_logs, step=state.global_step, epoch=state.epoch, framework="transformers"
+                )
 
     def on_train_end(self, args, state, control, **kwargs):
         if self._initialized and state.is_world_process_zero:
-            experiment = comet_ml.config.get_global_experiment()
-            if experiment is not None:
+            if self._experiment is not None:
                 if self._log_assets is True:
                     logger.info("Logging checkpoints. This may take time.")
-                    experiment.log_asset_folder(
+                    self._experiment.log_asset_folder(
                         args.output_dir, recursive=True, log_file_name=True, step=state.global_step
                     )
-                experiment.end()
+
+            # We create one experiment per trial in HPO mode
+            if state.is_hyper_param_search:
+                self._experiment.clean()
+                self._initialized = False
+
+    def on_predict(self, args, state, control, metrics, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model=None)
+        if state.is_world_process_zero and self._experiment is not None:
+            rewritten_metrics = rewrite_logs(metrics)
+            self._experiment.__internal_api__log_metrics__(
+                rewritten_metrics, step=state.global_step, epoch=state.epoch, framework="transformers"
+            )
 
 
 class AzureMLCallback(TrainerCallback):
@@ -986,11 +1290,13 @@ class MLflowCallback(TrainerCallback):
             Whether to use MLflow nested runs. If set to `True` or *1*, will create a nested run inside the current
             run.
         - **MLFLOW_RUN_ID** (`str`, *optional*):
-            Allow to reattach to an existing run which can be usefull when resuming training from a checkpoint. When
+            Allow to reattach to an existing run which can be useful when resuming training from a checkpoint. When
             `MLFLOW_RUN_ID` environment variable is set, `start_run` attempts to resume a run with the specified run ID
             and other parameters are ignored.
         - **MLFLOW_FLATTEN_PARAMS** (`str`, *optional*, defaults to `False`):
             Whether to flatten the parameters dictionary before logging.
+        - **MLFLOW_MAX_LOG_PARAMS** (`int`, *optional*):
+            Set the maximum number of parameters to log in the run.
         """
         self._log_artifacts = os.getenv("HF_MLFLOW_LOG_ARTIFACTS", "FALSE").upper() in ENV_VARS_TRUE_VALUES
         self._nested_run = os.getenv("MLFLOW_NESTED_RUN", "FALSE").upper() in ENV_VARS_TRUE_VALUES
@@ -998,6 +1304,7 @@ class MLflowCallback(TrainerCallback):
         self._experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", None)
         self._flatten_params = os.getenv("MLFLOW_FLATTEN_PARAMS", "FALSE").upper() in ENV_VARS_TRUE_VALUES
         self._run_id = os.getenv("MLFLOW_RUN_ID", None)
+        self._max_log_params = os.getenv("MLFLOW_MAX_LOG_PARAMS", None)
 
         # "synchronous" flag is only available with mlflow version >= 2.8.0
         # https://github.com/mlflow/mlflow/pull/9705
@@ -1006,7 +1313,7 @@ class MLflowCallback(TrainerCallback):
 
         logger.debug(
             f"MLflow experiment_name={self._experiment_name}, run_name={args.run_name}, nested={self._nested_run},"
-            f" tags={self._nested_run}, tracking_uri={self._tracking_uri}"
+            f" tracking_uri={self._tracking_uri}"
         )
         if state.is_world_process_zero:
             if not self._ml_flow.is_tracking_uri_set():
@@ -1046,6 +1353,13 @@ class MLflowCallback(TrainerCallback):
                     del combined_dict[name]
             # MLflow cannot log more than 100 values in one go, so we have to split it
             combined_dict_items = list(combined_dict.items())
+            if self._max_log_params and self._max_log_params.isdigit():
+                max_log_params = int(self._max_log_params)
+                if max_log_params < len(combined_dict_items):
+                    logger.debug(
+                        f"Reducing the number of parameters to log from {len(combined_dict_items)} to {max_log_params}."
+                    )
+                    combined_dict_items = combined_dict_items[:max_log_params]
             for i in range(0, len(combined_dict_items), self._MAX_PARAMS_TAGS_PER_BATCH):
                 if self._async_log:
                     self._ml_flow.log_params(
@@ -1071,16 +1385,21 @@ class MLflowCallback(TrainerCallback):
             for k, v in logs.items():
                 if isinstance(v, (int, float)):
                     metrics[k] = v
+                elif isinstance(v, torch.Tensor) and v.numel() == 1:
+                    metrics[k] = v.item()
                 else:
                     logger.warning(
                         f'Trainer is attempting to log a value of "{v}" of type {type(v)} for key "{k}" as a metric. '
                         "MLflow's log_metric() only accepts float and int types so we dropped this attribute."
                     )
 
+            # sanitize metric names to replace unsupported characters like parentheses
+            sanitized_metrics = {re.sub(r"[^0-9A-Za-z_\-\.\ :/]", "_", k): v for k, v in metrics.items()}
+
             if self._async_log:
-                self._ml_flow.log_metrics(metrics=metrics, step=state.global_step, synchronous=False)
+                self._ml_flow.log_metrics(metrics=sanitized_metrics, step=state.global_step, synchronous=False)
             else:
-                self._ml_flow.log_metrics(metrics=metrics, step=state.global_step)
+                self._ml_flow.log_metrics(metrics=sanitized_metrics, step=state.global_step)
 
     def on_train_end(self, args, state, control, **kwargs):
         if self._initialized and state.is_world_process_zero:
@@ -1172,6 +1491,10 @@ class NeptuneMissingConfiguration(Exception):
 class NeptuneCallback(TrainerCallback):
     """TrainerCallback that sends the logs to [Neptune](https://app.neptune.ai).
 
+    > [!WARNING]
+    > Neptune integration is deprecated and will be removed in a future version of Transformers. We recommend using
+    > other supported experiment tracking integrations.
+
     Args:
         api_token (`str`, *optional*): Neptune API token obtained upon registration.
             You can leave this argument out if you have saved your token to the `NEPTUNE_API_TOKEN` environment
@@ -1181,7 +1504,7 @@ class NeptuneCallback(TrainerCallback):
             You can find and copy the name in Neptune from the project settings -> Properties. If None (default), the
             value of the `NEPTUNE_PROJECT` environment variable is used.
         name (`str`, *optional*): Custom name for the run.
-        base_namespace (`str`, optional, defaults to "finetuning"): In the Neptune run, the root namespace
+        base_namespace (`str`, *optional*, defaults to "finetuning"): In the Neptune run, the root namespace
             that will contain all of the metadata logged by the callback.
         log_parameters (`bool`, *optional*, defaults to `True`):
             If True, logs all Trainer arguments and model parameters provided by the Trainer.
@@ -1208,15 +1531,20 @@ class NeptuneCallback(TrainerCallback):
     def __init__(
         self,
         *,
-        api_token: Optional[str] = None,
-        project: Optional[str] = None,
-        name: Optional[str] = None,
+        api_token: str | None = None,
+        project: str | None = None,
+        name: str | None = None,
         base_namespace: str = "finetuning",
         run=None,
         log_parameters: bool = True,
-        log_checkpoints: Optional[str] = None,
+        log_checkpoints: str | None = None,
         **neptune_run_kwargs,
     ):
+        warnings.warn(
+            "The NeptuneCallback is deprecated and will be removed in a future version of Transformers. We recommend "
+            "using other supported experiment tracking integrations.",
+            FutureWarning,
+        )
         if not is_neptune_available():
             raise ValueError(
                 "NeptuneCallback requires the Neptune client library to be installed. "
@@ -1241,7 +1569,7 @@ class NeptuneCallback(TrainerCallback):
         self._base_namespace_path = base_namespace
         self._log_parameters = log_parameters
         self._log_checkpoints = log_checkpoints
-        self._initial_run: Optional[Run] = run
+        self._initial_run: Run | None = run
 
         self._run = None
         self._is_monitoring_run = False
@@ -1360,10 +1688,10 @@ class NeptuneCallback(TrainerCallback):
                 copy_path = os.path.join(consistent_checkpoint_path, cpkt_path)
                 shutil.copytree(relative_path, copy_path)
                 target_path = consistent_checkpoint_path
-            except IOError as e:
+            except OSError as e:
                 logger.warning(
-                    "NeptuneCallback was unable to made a copy of checkpoint due to I/O exception: '{}'. "
-                    "Could fail trying to upload.".format(e)
+                    f"NeptuneCallback was unable to made a copy of checkpoint due to I/O exception: '{e}'. "
+                    "Could fail trying to upload."
                 )
 
         self._metadata_namespace[self._target_checkpoints_namespace].upload_files(target_path)
@@ -1375,7 +1703,7 @@ class NeptuneCallback(TrainerCallback):
 
     def on_init_end(self, args, state, control, **kwargs):
         self._volatile_checkpoints_dir = None
-        if self._log_checkpoints and (args.overwrite_output_dir or args.save_total_limit is not None):
+        if self._log_checkpoints and args.save_total_limit is not None:
             self._volatile_checkpoints_dir = tempfile.TemporaryDirectory().name
 
         if self._log_checkpoints == "best" and not args.load_best_model_at_end:
@@ -1429,7 +1757,7 @@ class NeptuneCallback(TrainerCallback):
 
         raise Exception("The trainer doesn't have a NeptuneCallback configured.")
 
-    def on_log(self, args, state, control, logs: Optional[Dict[str, float]] = None, **kwargs):
+    def on_log(self, args, state, control, logs: dict[str, float] | None = None, **kwargs):
         if not state.is_world_process_zero:
             return
 
@@ -1452,6 +1780,11 @@ class CodeCarbonCallback(TrainerCallback):
             raise RuntimeError(
                 "CodeCarbonCallback requires `codecarbon` to be installed. Run `pip install codecarbon`."
             )
+        elif torch.version.hip:
+            raise RuntimeError(
+                "CodeCarbonCallback requires `codecarbon` package, which is not compatible with AMD ROCm (https://github.com/mlco2/codecarbon/pull/490). When using the Trainer, please specify the `report_to` argument (https://huggingface.co/docs/transformers/v4.39.3/en/main_classes/trainer#transformers.TrainingArguments.report_to) to disable CodeCarbonCallback."
+            )
+
         import codecarbon
 
         self._codecarbon = codecarbon
@@ -1516,7 +1849,7 @@ class ClearMLCallback(TrainerCallback):
         self._log_model = False
         self._checkpoints_saved = []
 
-    def setup(self, args, state, model, tokenizer, **kwargs):
+    def setup(self, args, state, model, processing_class, **kwargs):
         if self._clearml is None:
             return
         if self._initialized:
@@ -1615,25 +1948,25 @@ class ClearMLCallback(TrainerCallback):
                         description=configuration_object_description,
                     )
 
-    def on_train_begin(self, args, state, control, model=None, tokenizer=None, **kwargs):
+    def on_train_begin(self, args, state, control, model=None, processing_class=None, **kwargs):
         if self._clearml is None:
             return
         self._checkpoints_saved = []
         if state.is_hyper_param_search:
             self._initialized = False
         if not self._initialized:
-            self.setup(args, state, model, tokenizer, **kwargs)
+            self.setup(args, state, model, processing_class, **kwargs)
 
     def on_train_end(self, args, state, control, **kwargs):
         if ClearMLCallback._should_close_on_train_end:
             self._clearml_task.close()
             ClearMLCallback._train_run_counter = 0
 
-    def on_log(self, args, state, control, model=None, tokenizer=None, logs=None, **kwargs):
+    def on_log(self, args, state, control, model=None, processing_class=None, logs=None, **kwargs):
         if self._clearml is None:
             return
         if not self._initialized:
-            self.setup(args, state, model, tokenizer, **kwargs)
+            self.setup(args, state, model, processing_class, **kwargs)
         if state.is_world_process_zero:
             eval_prefix = "eval_"
             eval_prefix_len = len(eval_prefix)
@@ -1707,9 +2040,7 @@ class ClearMLCallback(TrainerCallback):
                     )
                 except Exception as e:
                     logger.warning(
-                        "Could not remove checkpoint `{}` after going over the `save_total_limit`. Error is: {}".format(
-                            self._checkpoints_saved[0].name, e
-                        )
+                        f"Could not remove checkpoint `{self._checkpoints_saved[0].name}` after going over the `save_total_limit`. Error is: {e}"
                     )
                     break
                 self._checkpoints_saved = self._checkpoints_saved[1:]
@@ -1805,8 +2136,8 @@ class DVCLiveCallback(TrainerCallback):
 
     def __init__(
         self,
-        live: Optional[Any] = None,
-        log_model: Optional[Union[Literal["all"], bool]] = None,
+        live: Any | None = None,
+        log_model: Literal["all"] | bool | None = None,
         **kwargs,
     ):
         if not is_dvclive_available():
@@ -1879,12 +2210,175 @@ class DVCLiveCallback(TrainerCallback):
             from transformers.trainer import Trainer
 
             if self._log_model is True:
-                fake_trainer = Trainer(args=args, model=kwargs.get("model"), tokenizer=kwargs.get("tokenizer"))
+                fake_trainer = Trainer(
+                    args=args,
+                    model=kwargs.get("model"),
+                    processing_class=kwargs.get("processing_class"),
+                    eval_dataset=["fake"],
+                )
                 name = "best" if args.load_best_model_at_end else "last"
                 output_dir = os.path.join(args.output_dir, name)
                 fake_trainer.save_model(output_dir)
                 self.live.log_artifact(output_dir, name=name, type="model", copy=True)
             self.live.end()
+
+
+class SwanLabCallback(TrainerCallback):
+    """
+    A [`TrainerCallback`] that logs metrics, media, model checkpoints to [SwanLab](https://swanlab.cn/).
+    """
+
+    def __init__(self):
+        if not is_swanlab_available():
+            raise RuntimeError("SwanLabCallback requires swanlab to be installed. Run `pip install swanlab`.")
+        import swanlab
+
+        self._swanlab = swanlab
+        self._initialized = False
+        self._log_model = os.getenv("SWANLAB_LOG_MODEL", None)
+
+    def setup(self, args, state, model, **kwargs):
+        """
+        Setup the optional SwanLab (*swanlab*) integration.
+
+        One can subclass and override this method to customize the setup if needed. Find more information
+        [here](https://docs.swanlab.cn/guide_cloud/integration/integration-huggingface-transformers.html).
+
+        You can also override the following environment variables. Find more information about environment
+        variables [here](https://docs.swanlab.cn/en/api/environment-variable.html#environment-variables)
+
+        Environment:
+        - **SWANLAB_API_KEY** (`str`, *optional*, defaults to `None`):
+            Cloud API Key. During login, this environment variable is checked first. If it doesn't exist, the system
+            checks if the user is already logged in. If not, the login process is initiated.
+
+                - If a string is passed to the login interface, this environment variable is ignored.
+                - If the user is already logged in, this environment variable takes precedence over locally stored
+                login information.
+
+        - **SWANLAB_PROJECT** (`str`, *optional*, defaults to `None`):
+            Set this to a custom string to store results in a different project. If not specified, the name of the current
+            running directory is used.
+
+        - **SWANLAB_LOG_DIR** (`str`, *optional*, defaults to `swanlog`):
+            This environment variable specifies the storage path for log files when running in local mode.
+            By default, logs are saved in a folder named swanlog under the working directory.
+
+        - **SWANLAB_MODE** (`Literal["local", "cloud", "disabled"]`, *optional*, defaults to `cloud`):
+            SwanLab's parsing mode, which involves callbacks registered by the operator. Currently, there are three modes:
+            local, cloud, and disabled. Note: Case-sensitive. Find more information
+            [here](https://docs.swanlab.cn/en/api/py-init.html#swanlab-init)
+
+        - **SWANLAB_LOG_MODEL** (`str`, *optional*, defaults to `None`):
+            SwanLab does not currently support the save mode functionality.This feature will be available in a future
+            release
+
+        - **SWANLAB_WEB_HOST** (`str`, *optional*, defaults to `None`):
+            Web address for the SwanLab cloud environment for private version (its free)
+
+        - **SWANLAB_API_HOST** (`str`, *optional*, defaults to `None`):
+            API address for the SwanLab cloud environment for private version (its free)
+
+        """
+        self._initialized = True
+
+        if state.is_world_process_zero:
+            logger.info('Automatic SwanLab logging enabled, to disable set os.environ["SWANLAB_MODE"] = "disabled"')
+            combined_dict = {**args.to_dict()}
+
+            if hasattr(model, "config") and model.config is not None:
+                model_config = model.config if isinstance(model.config, dict) else model.config.to_dict()
+                combined_dict = {**model_config, **combined_dict}
+            if hasattr(model, "peft_config") and model.peft_config is not None:
+                peft_config = model.peft_config
+                combined_dict = {"peft_config": peft_config, **combined_dict}
+            trial_name = state.trial_name
+            init_args = {}
+            if trial_name is not None and args.run_name is not None:
+                init_args["experiment_name"] = f"{args.run_name}-{trial_name}"
+            elif args.run_name is not None:
+                init_args["experiment_name"] = args.run_name
+            elif trial_name is not None:
+                init_args["experiment_name"] = trial_name
+            init_args["project"] = os.getenv("SWANLAB_PROJECT", None)
+
+            if self._swanlab.get_run() is None:
+                self._swanlab.init(
+                    **init_args,
+                )
+            # show transformers logo!
+            self._swanlab.config["FRAMEWORK"] = "🤗transformers"
+            # add config parameters (run may have been created manually)
+            self._swanlab.config.update(combined_dict)
+
+            # add number of model parameters to swanlab config
+            try:
+                self._swanlab.config.update({"model_num_parameters": model.num_parameters()})
+                # get peft model parameters
+                if type(model).__name__ == "PeftModel" or type(model).__name__ == "PeftMixedModel":
+                    trainable_params, all_param = model.get_nb_trainable_parameters()
+                    self._swanlab.config.update({"peft_model_trainable_params": trainable_params})
+                    self._swanlab.config.update({"peft_model_all_param": all_param})
+            except AttributeError:
+                logger.info("Could not log the number of model parameters in SwanLab due to an AttributeError.")
+
+            # log the initial model architecture to an artifact
+            if self._log_model is not None:
+                logger.warning(
+                    "SwanLab does not currently support the save mode functionality. "
+                    "This feature will be available in a future release."
+                )
+                badge_markdown = (
+                    f'[<img src="https://raw.githubusercontent.com/SwanHubX/assets/main/badge1.svg"'
+                    f' alt="Visualize in SwanLab" height="28'
+                    f'0" height="32"/>]({self._swanlab.get_run().public.cloud.experiment_url})'
+                )
+
+                modelcard.AUTOGENERATED_TRAINER_COMMENT += f"\n{badge_markdown}"
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, model, **kwargs)
+
+    def on_train_end(self, args, state, control, model=None, processing_class=None, **kwargs):
+        if self._log_model is not None and self._initialized and state.is_world_process_zero:
+            logger.warning(
+                "SwanLab does not currently support the save mode functionality. "
+                "This feature will be available in a future release."
+            )
+
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        single_value_scalars = [
+            "train_runtime",
+            "train_samples_per_second",
+            "train_steps_per_second",
+            "train_loss",
+            "total_flos",
+        ]
+
+        if not self._initialized:
+            self.setup(args, state, model)
+        if state.is_world_process_zero:
+            for k, v in logs.items():
+                if k in single_value_scalars:
+                    self._swanlab.log({f"single_value/{k}": v}, step=state.global_step)
+            non_scalar_logs = {k: v for k, v in logs.items() if k not in single_value_scalars}
+            non_scalar_logs = rewrite_logs(non_scalar_logs)
+            self._swanlab.log({**non_scalar_logs, "train/global_step": state.global_step}, step=state.global_step)
+
+    def on_save(self, args, state, control, **kwargs):
+        if self._log_model is not None and self._initialized and state.is_world_process_zero:
+            logger.warning(
+                "SwanLab does not currently support the save mode functionality. "
+                "This feature will be available in a future release."
+            )
+
+    def on_predict(self, args, state, control, metrics, **kwargs):
+        if not self._initialized:
+            self.setup(args, state, **kwargs)
+        if state.is_world_process_zero:
+            metrics = rewrite_logs(metrics)
+            self._swanlab.log(metrics)
 
 
 INTEGRATION_TO_CALLBACK = {
@@ -1893,16 +2387,29 @@ INTEGRATION_TO_CALLBACK = {
     "mlflow": MLflowCallback,
     "neptune": NeptuneCallback,
     "tensorboard": TensorBoardCallback,
+    "trackio": TrackioCallback,
     "wandb": WandbCallback,
     "codecarbon": CodeCarbonCallback,
     "clearml": ClearMLCallback,
     "dagshub": DagsHubCallback,
     "flyte": FlyteCallback,
     "dvclive": DVCLiveCallback,
+    "swanlab": SwanLabCallback,
 }
 
 
 def get_reporting_integration_callbacks(report_to):
+    if report_to is None:
+        return []
+
+    if isinstance(report_to, str):
+        if "none" == report_to:
+            return []
+        elif "all" == report_to:
+            report_to = get_available_reporting_integrations()
+        else:
+            report_to = [report_to]
+
     for integration in report_to:
         if integration not in INTEGRATION_TO_CALLBACK:
             raise ValueError(

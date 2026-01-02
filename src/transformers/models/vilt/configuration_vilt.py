@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" VilT model configuration"""
+"""VilT model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import VILT_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class ViltConfig(PretrainedConfig):
+class ViltConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`ViLTModel`]. It is used to instantiate an ViLT
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the ViLT
     [dandelin/vilt-b32-mlm](https://huggingface.co/dandelin/vilt-b32-mlm) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         vocab_size (`int`, *optional*, defaults to 30522):
@@ -42,7 +39,7 @@ class ViltConfig(PretrainedConfig):
             The vocabulary size of the `token_type_ids` passed when calling [`ViltModel`]. This is used when encoding
             text.
         modality_type_vocab_size (`int`, *optional*, defaults to 2):
-            The vocabulary size of the modalities passed when calling [`ViltModel`]. This is used after concatening the
+            The vocabulary size of the modalities passed when calling [`ViltModel`]. This is used after concatenating the
             embeddings of the text and image modalities.
         max_position_embeddings (`int`, *optional*, defaults to 40):
             The maximum sequence length that this model might ever be used with.
@@ -118,7 +115,7 @@ class ViltConfig(PretrainedConfig):
         num_channels=3,
         qkv_bias=True,
         max_image_length=-1,
-        tie_word_embeddings=False,
+        tie_word_embeddings=True,
         num_images=-1,
         **kwargs,
     ):
@@ -145,3 +142,7 @@ class ViltConfig(PretrainedConfig):
         self.qkv_bias = qkv_bias
         self.max_image_length = max_image_length
         self.num_images = num_images
+        self.tie_word_embeddings = True  # force it
+
+
+__all__ = ["ViltConfig"]

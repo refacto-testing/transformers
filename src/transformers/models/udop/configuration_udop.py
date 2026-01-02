@@ -12,28 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" UDOP model configuration"""
+"""UDOP model configuration"""
 
-
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import UDOP_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class UdopConfig(PretrainedConfig):
+class UdopConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`UdopForConditionalGeneration`]. It is used to
     instantiate a UDOP model according to the specified arguments, defining the model architecture. Instantiating a
     configuration with the defaults will yield a similar configuration to that of the UDOP
     [microsoft/udop-large](https://huggingface.co/microsoft/udop-large) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Arguments:
         vocab_size (`int`, *optional*, defaults to 33201):
@@ -56,7 +52,7 @@ class UdopConfig(PretrainedConfig):
             The number of buckets to use for each attention layer.
         relative_attention_max_distance (`int`, *optional*, defaults to 128):
             The maximum distance of the longer sequences for the bucket separation.
-        relative_bias_args (`List[dict]`, *optional*, defaults to `[{'type': '1d'}, {'type': 'horizontal'}, {'type': 'vertical'}]`):
+        relative_bias_args (`list[dict]`, *optional*, defaults to `[{'type': '1d'}, {'type': 'horizontal'}, {'type': 'vertical'}]`):
             A list of dictionaries containing the arguments for the relative bias layers.
         dropout_rate (`float`, *optional*, defaults to 0.1):
             The ratio for all dropout layers.
@@ -139,7 +135,7 @@ class UdopConfig(PretrainedConfig):
         self.patch_size = patch_size
         self.num_channels = num_channels
         if not isinstance(relative_bias_args, list):
-            raise ValueError("`relative_bias_args` should be a list of dictionaries.")
+            raise TypeError("`relative_bias_args` should be a list of dictionaries.")
         self.relative_bias_args = relative_bias_args
 
         act_info = self.feed_forward_proj.split("-")
@@ -153,9 +149,13 @@ class UdopConfig(PretrainedConfig):
                 "'gated-gelu' or 'relu'"
             )
 
+        kwargs["tie_word_embeddings"] = True
         super().__init__(
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             is_encoder_decoder=is_encoder_decoder,
             **kwargs,
         )
+
+
+__all__ = ["UdopConfig"]

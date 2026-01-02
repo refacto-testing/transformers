@@ -12,27 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" CPMAnt model configuration"""
+"""CPMAnt model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PreTrainedConfig
 from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
 
 
-from ..deprecated._archive_maps import CPMANT_PRETRAINED_CONFIG_ARCHIVE_MAP  # noqa: F401, E402
-
-
-class CpmAntConfig(PretrainedConfig):
+class CpmAntConfig(PreTrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`CpmAntModel`]. It is used to instantiate an
     CPMAnt model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the CPMAnt
     [openbmb/cpm-ant-10b](https://huggingface.co/openbmb/cpm-ant-10b) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
     Args:
         vocab_size (`int`, *optional*, defaults to 30720):
@@ -120,3 +117,6 @@ class CpmAntConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.vocab_size = vocab_size
         self.init_std = init_std
+
+
+__all__ = ["CpmAntConfig"]
