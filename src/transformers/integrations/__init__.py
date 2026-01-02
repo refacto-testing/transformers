@@ -69,7 +69,6 @@ _import_structure = {
     "hqq": ["prepare_for_hqq_linear"],
     "hub_kernels": [
         "LayerRepository",
-        "lazy_load_kernel",
         "register_kernel_mapping",
         "replace_kernel_forward_from_hub",
         "use_kernel_forward_from_hub",
@@ -116,11 +115,6 @@ _import_structure = {
         "run_hp_search_optuna",
         "run_hp_search_ray",
         "run_hp_search_wandb",
-    ],
-    "moe": [
-        "batched_mm_experts_forward",
-        "grouped_mm_experts_forward",
-        "use_experts_implementation",
     ],
     "mxfp4": [
         "Mxfp4GptOssExperts",
@@ -217,7 +211,6 @@ if TYPE_CHECKING:
     from .hqq import prepare_for_hqq_linear
     from .hub_kernels import (
         LayerRepository,
-        lazy_load_kernel,
         register_kernel_mapping,
         replace_kernel_forward_from_hub,
         use_kernel_forward_from_hub,
@@ -264,11 +257,6 @@ if TYPE_CHECKING:
         run_hp_search_optuna,
         run_hp_search_ray,
         run_hp_search_wandb,
-    )
-    from .moe import (
-        batched_mm_experts_forward,
-        grouped_mm_experts_forward,
-        use_experts_implementation,
     )
     from .mxfp4 import (
         Mxfp4GptOssExperts,
