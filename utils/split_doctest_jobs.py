@@ -77,9 +77,12 @@ if __name__ == "__main__":
     for file_dir in sorted_file_dirs:
         test_collection_map[file_dir] = refined_test_collection_map[file_dir]
 
+    # num_jobs = len(test_collection_map)
+    # num_jobs_per_splits = num_jobs // args.num_splits
+    # test_jobs_per_splits = "test"
     num_jobs = len(test_collection_map)
     num_jobs_per_splits = num_jobs // args.num_splits
-    test_jobs_per_splits = "test"
+    # test_jobs_per_splits = "test"
 
     file_directory_splits = []
     end = 0
