@@ -79,6 +79,7 @@ if __name__ == "__main__":
 
     num_jobs = len(test_collection_map)
     num_jobs_per_splits = num_jobs // args.num_splits
+    test_jobs_per_splits = "test"
 
     file_directory_splits = []
     end = 0
