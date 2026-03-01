@@ -3,7 +3,7 @@ name: Doctests
 on:
   push:
     branches:
-      - run_doctest*
+      - run_refactor_doctest
   repository_dispatch:
   schedule:
     - cron: "17 2 * * *"
@@ -14,11 +14,10 @@ env:
 jobs:
   setup:
     name: Setup
-    runs-on: 
-      group: aws-g5-4xlarge-cache
+    runs-on: [single-gpu, nvidia-gpu, t4, ci]
     container:
       image: huggingface/transformers-all-latest-gpu
-      options: --gpus all --shm-size "16gb" --ipc host -v /mnt/cache/.cache/huggingface:/mnt/cache/
+      options: --gpus 0 --shm-size "16gb" --ipc host -v /mnt/cache/.cache/huggingface:/mnt/cache/
     outputs:
       job_splits: ${{ steps.set-matrix.outputs.job_splits }}
       split_keys: ${{ steps.set-matrix.outputs.split_keys }}
@@ -53,7 +52,6 @@ jobs:
     name: "Call doctest jobs"
     needs: setup
     strategy:
-      max-parallel: 1  # 1 split at a time (in `doctest_job.yml`, we set `8` to run 8 jobs at the same time)
       fail-fast: false
       matrix:
         split_keys: ${{ fromJson(needs.setup.outputs.split_keys) }}
@@ -83,7 +81,7 @@ jobs:
 
       - name: "Upload results"
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: doc_test_results
           path: doc_test_results
